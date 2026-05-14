@@ -18,6 +18,11 @@ export async function findMailboxByEmail(email: string): Promise<Mailbox | undef
   return rows[0];
 }
 
+export async function findMailboxById(id: number): Promise<Mailbox | undefined> {
+  const rows = await db.select().from(mailboxes).where(eq(mailboxes.id, id));
+  return rows[0];
+}
+
 export async function listEnabledMailboxes(): Promise<Mailbox[]> {
   return db.select().from(mailboxes).where(eq(mailboxes.enabled, true));
 }

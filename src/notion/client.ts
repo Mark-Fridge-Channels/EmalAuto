@@ -165,3 +165,24 @@ export async function retrieveDatabase(databaseId: string): Promise<{
     path: `/databases/${hyphenateId(databaseId)}`,
   });
 }
+
+/**
+ * Create a page (row) inside the configured Notion database.
+ *
+ * `properties` should already be in Notion API write-format (e.g. `{title: [...]}`,
+ * `{select: { name }}`, `{date: { start }}`, `{rich_text: [...]}`, etc).
+ * The caller MUST include a value for the database's title property.
+ */
+export async function createPageInDatabase(
+  databaseId: string,
+  properties: Record<string, unknown>,
+): Promise<NotionPage> {
+  return notionFetch<NotionPage>({
+    method: "POST",
+    path: `/pages`,
+    body: {
+      parent: { database_id: hyphenateId(databaseId) },
+      properties,
+    },
+  });
+}

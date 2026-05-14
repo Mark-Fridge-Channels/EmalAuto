@@ -115,9 +115,17 @@ const notionSchema = z.object({
   action_values: z.object({
     send: z.string().min(1),
     reply: z.string().min(1),
+    /** Written on the NEW Notion row we create when an inbound reply is matched. */
+    inbound_reply: z.string().min(1),
+  }),
+  reply_status_values: z.object({
+    /** Stamped on the ORIGINAL outbound row's "Reply Status" once its inbound reply has a child row. */
+    done: z.string().min(1),
   }),
   platform_value: z.string().min(1),
   in_n_out_value: z.string().min(1),
+  /** Value written into InNOut for the new inbound-reply child row (default "In"). */
+  in_n_out_inbound_value: z.string().min(1),
 });
 
 const graphAppSchema = z.object({
@@ -279,9 +287,14 @@ export function loadConfig(): AppConfig {
       action_values: {
         send: envRequired("NOTION_ACTION_SEND"),
         reply: envRequired("NOTION_ACTION_REPLY"),
+        inbound_reply: envStr("NOTION_ACTION_INBOUND_REPLY", "Inbound Reply"),
+      },
+      reply_status_values: {
+        done: envStr("NOTION_REPLY_STATUS_DONE", "Done"),
       },
       platform_value: envRequired("NOTION_PLATFORM_VALUE"),
       in_n_out_value: envRequired("NOTION_IN_N_OUT_VALUE"),
+      in_n_out_inbound_value: envStr("NOTION_IN_N_OUT_INBOUND_VALUE", "In"),
     },
     graph_apps: readGraphApps(),
     graph_defaults: {

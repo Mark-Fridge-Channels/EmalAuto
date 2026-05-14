@@ -10,13 +10,21 @@
 
 import { logger } from "../utils/logger.js";
 import { loadConfig } from "../config/index.js";
-import { getPage, updatePage, type NotionPage } from "./client.js";
+import {
+  createPageInDatabase,
+  getPage,
+  retrieveDatabase,
+  updatePage,
+  type NotionPage,
+} from "./client.js";
 import {
   buildPropertyResolver,
   notionDate,
   notionDateTimeAsiaShanghai,
   notionEmail,
   notionRichText,
+  notionSelect,
+  notionTitle,
   statusOrSelect,
 } from "./property-mapper.js";
 
@@ -38,12 +46,24 @@ interface BounceUpdate {
   receivedAt: Date;
 }
 
-interface ReplyUpdate {
-  replyBodyText: string;
-  replyFromEmail: string;
-  receivedAt: Date;
-  /** Graph message `id` of the inbound mail in this mailbox — enables Notion "Reply" rows to use `createReply`. */
+interface InboundReplyRow {
+  /** Outbound row this inbound reply belongs to — used for back-reference + Reply Status stamp. */
+  parentOutboundNotionPageId: string;
+  /** Local mailbox (UPN) that received the reply. */
+  receivingMailbox: string;
+  /** Customer email that sent the reply. */
+  fromEmail: string;
+  /** Subject of the inbound message ("Re: …" etc.) — copied into Outreach Subject. */
+  subject: string;
+  /** Body preview (rich_text in Notion). */
+  bodyPreview: string;
+  /** Anchor message id for future `createReply` calls (Graph message id in the receiving mailbox). */
   replyAnchorGraphMessageId: string;
+  /** Conversation id (Graph) for cross-referencing with outbound_messages. */
+  conversationId: string;
+  /** Internet Message-ID header of the inbound (for ops debugging). */
+  internetMessageId?: string | null;
+  receivedAt: Date;
 }
 
 /** Read-modify-write merge into the `Payload` rich_text column (JSON). */
@@ -182,21 +202,88 @@ export async function writeBounce(notionPageId: string, upd: BounceUpdate): Prom
   });
 }
 
-export async function writeReply(notionPageId: string, upd: ReplyUpdate): Promise<void> {
+/* ---------------- Inbound-reply: NEW row + parent stamp ---------------- */
+
+let cachedTitlePropertyName: string | null = null;
+
+/** Discover (and cache) the database's single title property name. */
+async function getTitlePropertyName(): Promise<string> {
+  if (cachedTitlePropertyName) return cachedTitlePropertyName;
   const cfg = loadConfig();
-  const page = await getPage(notionPageId);
-  const replyBodyCol = cfg.notion.property_names.reply_body;
-  const replyEmailCol = cfg.notion.property_names.reply_email;
-  const lastReplyTimeCol = cfg.notion.property_names.last_reply_time;
+  const db = await retrieveDatabase(cfg.notion.database_id);
+  for (const [name, def] of Object.entries(db.properties)) {
+    if ((def as { type?: string }).type === "title") {
+      cachedTitlePropertyName = name;
+      return name;
+    }
+  }
+  throw new Error("notion: database has no title property — cannot create inbound-reply row");
+}
 
-  const mergedPayload = await mergePayload(page, {
-    replyToGraphMessageId: upd.replyAnchorGraphMessageId,
-  });
+/**
+ * Create a new Notion row that records an inbound reply as a standalone task.
+ *
+ * The row purposefully does NOT set OutReach Status, so the poller will not
+ * try to send it. To trigger a same-thread reply later, the user only has to:
+ *   1. Action = NOTION_ACTION_REPLY (e.g. "Reply Email")
+ *   2. InNOut = NOTION_IN_N_OUT_VALUE (e.g. "Out")
+ *   3. OutReach Status = NOTION_STATUS_TODO (e.g. "Todo")
+ *   4. Fill Outreach Body + Trigger Time
+ * The Payload's `replyToGraphMessageId` (set here) drives the in-thread send.
+ */
+export async function createInboundReplyRow(row: InboundReplyRow): Promise<string> {
+  const cfg = loadConfig();
+  const p = cfg.notion.property_names;
+  const titleColName = await getTitlePropertyName();
 
-  await updatePage(notionPageId, {
-    [replyBodyCol]: notionRichText(upd.replyBodyText),
-    [replyEmailCol]: notionEmail(upd.replyFromEmail),
-    [lastReplyTimeCol]: notionDateTimeAsiaShanghai(upd.receivedAt),
-    [mergedPayload.propertyName]: mergedPayload.value,
+  const titleText = `[Inbound Reply] ${row.subject || "(no subject)"}`.slice(0, 1900);
+  const payloadObj = {
+    actionType: "inbound_reply" as const,
+    replyToGraphMessageId: row.replyAnchorGraphMessageId,
+    conversationId: row.conversationId,
+    internetMessageId: row.internetMessageId ?? null,
+    receivedAt: row.receivedAt.toISOString(),
+    parentOutboundNotionPageId: row.parentOutboundNotionPageId,
+    to_email: row.fromEmail,
+    fromMailbox: row.receivingMailbox,
+  };
+
+  const properties: Record<string, unknown> = {
+    [titleColName]: notionTitle(titleText),
+    [p.Action]: notionSelect(cfg.notion.action_values.inbound_reply),
+    [p.Platform]: notionSelect(cfg.notion.platform_value),
+    [p.InNOut]: notionSelect(cfg.notion.in_n_out_inbound_value),
+    [p.sender_email]: notionRichText(row.receivingMailbox),
+    [p.subject]: notionRichText(row.subject),
+    [p.reply_body]: notionRichText(row.bodyPreview),
+    [p.reply_email]: notionEmail(row.fromEmail),
+    [p.last_reply_time]: notionDateTimeAsiaShanghai(row.receivedAt),
+    [p.payload]: notionRichText(JSON.stringify(payloadObj)),
+    [p.task_id]: notionRichText(`inbound__${row.replyAnchorGraphMessageId}`),
+  };
+
+  const created = await createPageInDatabase(cfg.notion.database_id, properties);
+  logger.info(
+    {
+      newNotionPageId: created.id,
+      parentOutboundNotionPageId: row.parentOutboundNotionPageId,
+      receivingMailbox: row.receivingMailbox,
+      fromEmail: row.fromEmail,
+    },
+    "inbound reply: child Notion row created",
+  );
+  return created.id;
+}
+
+/** Stamp the original outbound row's Reply Status (e.g. "Done") after a child row is created. */
+export async function markOriginalReplyDone(parentOutboundNotionPageId: string): Promise<void> {
+  const cfg = loadConfig();
+  const page = await getPage(parentOutboundNotionPageId);
+  const { pick } = buildPropertyResolver(cfg);
+  const replyStatusProp = pick(page.properties, "reply_status");
+  const replyStatusCol = cfg.notion.property_names.reply_status;
+
+  await updatePage(parentOutboundNotionPageId, {
+    [replyStatusCol]: statusOrSelect(replyStatusProp, cfg.notion.reply_status_values.done),
   });
 }
