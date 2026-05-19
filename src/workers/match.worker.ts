@@ -3,14 +3,16 @@
  *
  *   inbox row
  *     ↓ bounce detector (heuristic)
- *     ↓ matchInboundByConversation
+ *     ↓ resolveInboundOutboundMatch (conversationId, then legacy heuristic)
  *     ├── matched + bounce → mark outbound bounce + write Notion bounce
- *     ├── matched + reply  → create NEW Notion row (Action = Inbound Reply,
- *     │                       Payload.replyToGraphMessageId = anchor) and stamp
- *     │                       parent outbound row's Reply Status = Done
+ *     ├── matched + auto-reply → link inbox only (no reply_received / no IL child)
+ *     ├── matched + human reply → Notion Inbound Reply child + parent Done;
+ *     │                           DTC Entity ColdReach → Humen
  *     └── unmatched        → mark inbox ignored, no Notion writeback
  *
- * Idempotency: inbox rows already in `matched` / `bounce` state are skipped.
+ * Idempotency: inbox rows already in `matched` / `bounce` state are skipped for
+ * Notion side effects, but we still sync `outbound_messages.thread_status` when
+ * reconcile linked inbox without updating status (historical backfill).
  */
 
 import { Worker, type Job } from "bullmq";
@@ -20,13 +22,113 @@ import { getRedis } from "../queues/connection.js";
 import { QUEUE_NAMES, type MatchJobData } from "../queues/queues.js";
 import { findInboxById, markInboxIgnored, markInboxMatched } from "../db/repositories/inbox.repo.js";
 import { findMailboxById } from "../db/repositories/mailbox.repo.js";
-import { matchInboundByConversation } from "../services/reply-matcher.service.js";
+import { resolveInboundOutboundMatch } from "../services/reply-matcher.service.js";
 import { detectBounce } from "../services/bounce-detector.service.js";
-import { markOutboundBounce } from "../services/message-store.service.js";
+import { detectReplyKind } from "../services/auto-reply-detector.service.js";
+import { getMessageInternetHeaders } from "../graph/mail.service.js";
+import {
+  markOutboundBounce,
+  markOutboundReplyReceived,
+  findOutboundById,
+} from "../services/message-store.service.js";
 import { upsertConversation } from "../db/repositories/conversation.repo.js";
+import {
+  markDtcEntityColdReachOnHumanReply,
+  rollbackDtcEntityColdReachOnBounce,
+} from "../notion/dtc-send.js";
 import { createInboundReplyRow, markOriginalReplyDone, writeBounce } from "../notion/writer.js";
+import { getPage } from "../notion/client.js";
+import { extractCrmFromInteractionLogPage } from "../notion/crm-snapshot.js";
+import { updateInboxCrmFields } from "../db/repositories/inbox.repo.js";
+
+import type { CrmSnapshot } from "../notion/crm-snapshot.js";
+import type { InboxMessage } from "../db/schema/inbox_messages.js";
+import type { MatchResult } from "../services/reply-matcher.service.js";
 
 let worker: Worker<MatchJobData> | null = null;
+
+/** 当 Notion 未返回 CRM 时用于与 outbound 行合并。 */
+const EMPTY_CRM: CrmSnapshot = {
+  keyPersonId: null,
+  keyPersonName: null,
+  keyPersonNotionUrl: null,
+  entityName: null,
+  entityNotionUrl: null,
+};
+
+/** Notion 优先；缺省字段用 `outbound_messages`（含回填写入的 URL）补上。 */
+function mergeCrmNotionThenOutbound(notion: CrmSnapshot, ob: Awaited<ReturnType<typeof findOutboundById>>): CrmSnapshot {
+  if (!ob) return notion;
+  const pick = (n: string | null, p: string | null | undefined) =>
+    n != null && String(n).trim() !== "" ? n : p != null && String(p).trim() !== "" ? String(p).trim() : null;
+  return {
+    keyPersonId: pick(notion.keyPersonId, ob.keyPersonId),
+    keyPersonName: pick(notion.keyPersonName, ob.keyPersonName),
+    keyPersonNotionUrl: pick(notion.keyPersonNotionUrl, ob.keyPersonNotionUrl),
+    entityName: pick(notion.entityName, ob.entityName),
+    entityNotionUrl: pick(notion.entityNotionUrl, ob.entityNotionUrl),
+  };
+}
+
+/** Refresh inbox CRM from parent IL (DTC relations) + matched outbound row. */
+async function syncInboxCrmFromMatch(
+  inboxRowId: number,
+  outboundId: number,
+  notionPageId: string | null | undefined,
+): Promise<{ crm: CrmSnapshot; ob: Awaited<ReturnType<typeof findOutboundById>> }> {
+  let notionCrm: CrmSnapshot = EMPTY_CRM;
+  if (notionPageId) {
+    try {
+      const parentPage = await getPage(notionPageId);
+      notionCrm = await extractCrmFromInteractionLogPage(parentPage, loadConfig());
+    } catch (err) {
+      logger.warn({ err, inboxRowId, notionPageId }, "match: CRM snapshot from Notion failed");
+    }
+  }
+  const ob = await findOutboundById(outboundId);
+  const crm = mergeCrmNotionThenOutbound(notionCrm, ob);
+  await updateInboxCrmFields(inboxRowId, crm);
+  return { crm, ob };
+}
+
+/** Reconcile 可能已写 inbox 关联但未更新 outbound.thread_status。 */
+async function syncOutboundThreadStatusFromFinalizedInbox(
+  row: InboxMessage,
+  bounce: ReturnType<typeof detectBounce>,
+): Promise<void> {
+  if (!row.matchedOutboundId) return;
+  const ob = await findOutboundById(row.matchedOutboundId);
+  if (!ob || ob.threadStatus !== "sent") return;
+
+  if (row.matchStatus === "bounce") {
+    const reason =
+      bounce.isBounce
+        ? `${bounce.reason}; subject="${row.subject}"; from=${row.fromEmail}`
+        : `reconcile bounce; subject="${row.subject}"; from=${row.fromEmail}`;
+    await markOutboundBounce(ob.id, reason);
+    logger.info({ inboxRowId: row.id, outboundId: ob.id }, "match: synced outbound bounce from finalized inbox");
+    return;
+  }
+
+  if (row.matchStatus === "matched") {
+    await markOutboundReplyReceived(ob.id);
+    logger.info({ inboxRowId: row.id, outboundId: ob.id }, "match: synced outbound reply_received from finalized inbox");
+  }
+}
+
+async function applyOutboundThreadStatus(
+  matched: MatchResult,
+  bounce: ReturnType<typeof detectBounce>,
+  row: InboxMessage,
+): Promise<void> {
+  if (!matched.outboundId) return;
+  if (bounce.isBounce) {
+    const reason = `${bounce.reason}; subject="${row.subject}"; from=${row.fromEmail}`;
+    await markOutboundBounce(matched.outboundId, reason);
+    return;
+  }
+  await markOutboundReplyReceived(matched.outboundId);
+}
 
 async function processMatch(job: Job<MatchJobData>): Promise<void> {
   const row = await findInboxById(job.data.inboxRowId);
@@ -35,19 +137,34 @@ async function processMatch(job: Job<MatchJobData>): Promise<void> {
     return;
   }
 
+  const bounce = detectBounce({ fromEmail: row.fromEmail, subject: row.subject });
+
   // Idempotency guard. Since we now CREATE a child Notion row (instead of
   // patching the parent), re-running on a row whose match_status is already
   // matched/bounce would produce a duplicate. Skip those.
-  if (row.matchStatus === "matched" || row.matchStatus === "bounce") {
+  if (row.matchStatus === "matched" || row.matchStatus === "bounce" || row.matchStatus === "auto_reply") {
+    await syncOutboundThreadStatusFromFinalizedInbox(row, bounce);
     logger.debug(
       { inboxRowId: row.id, matchStatus: row.matchStatus },
-      "match: inbox row already finalized, skipping",
+      "match: inbox row already finalized, skipping side effects",
     );
     return;
   }
 
-  const bounce = detectBounce({ fromEmail: row.fromEmail, subject: row.subject });
-  const matched = await matchInboundByConversation(row.conversationId);
+  const mailbox = await findMailboxById(row.mailboxId);
+  const mailboxEmail = mailbox?.email ?? "";
+
+  const matched = await resolveInboundOutboundMatch(
+    {
+      mailboxId: row.mailboxId,
+      conversationId: row.conversationId,
+      subject: row.subject,
+      fromEmail: row.fromEmail,
+      recipientsJson: row.recipientsJson,
+      receivedAt: row.receivedAt,
+    },
+    mailboxEmail,
+  );
 
   if (!matched.matched) {
     if (bounce.isBounce) {
@@ -57,35 +174,125 @@ async function processMatch(job: Job<MatchJobData>): Promise<void> {
           conversationId: row.conversationId,
           subject: row.subject,
           from: row.fromEmail,
+          reason: matched.reason,
         },
-        "match: bounce detected but no outbound conversation found",
+        "match: bounce detected but no outbound found",
       );
     }
     await markInboxIgnored(row.id);
     return;
   }
 
-  if (bounce.isBounce && matched.outboundId && matched.notionPageId) {
-    const reason = `${bounce.reason}; subject="${row.subject}"; from=${row.fromEmail}`;
-    await markOutboundBounce(matched.outboundId, reason);
-    await markInboxMatched(row.id, matched.outboundId, "bounce");
-    await upsertConversation(row.conversationId, matched.notionPageId, row.id, row.receivedAt);
-    await writeBounce(matched.notionPageId, {
-      reason,
-      inboundMessageId: row.graphMessageId,
-      inboundConversationId: row.conversationId,
-      receivedAt: row.receivedAt,
-    });
-    logger.info({ inboxRowId: row.id, outboundId: matched.outboundId }, "match: bounce written");
+  if (bounce.isBounce && matched.outboundId) {
+    await syncInboxCrmFromMatch(row.id, matched.outboundId, matched.notionPageId);
+    if (matched.notionPageId) {
+      await markInboxMatched(row.id, matched.outboundId, "bounce");
+      await upsertConversation(row.conversationId, matched.notionPageId, row.id, row.receivedAt);
+      const reason = `${bounce.reason}; subject="${row.subject}"; from=${row.fromEmail}`;
+      await writeBounce(matched.notionPageId, {
+        reason,
+        inboundMessageId: row.graphMessageId,
+        inboundConversationId: row.conversationId,
+        receivedAt: row.receivedAt,
+      });
+      try {
+        const rollback = await rollbackDtcEntityColdReachOnBounce(matched.notionPageId, loadConfig());
+        if (rollback.rolledBack) {
+          logger.info(
+            {
+              notionPageId: matched.notionPageId,
+              entityPageId: rollback.entityPageId,
+              currentStatus: rollback.currentStatus,
+            },
+            "match: DTC Entity ColdReach Status rolled back after bounce",
+          );
+        }
+      } catch (err) {
+        logger.error(
+          { err, notionPageId: matched.notionPageId, inboxRowId: row.id },
+          "match: DTC Entity ColdReach rollback failed after bounce",
+        );
+      }
+    } else {
+      await markInboxMatched(row.id, matched.outboundId, "bounce");
+    }
+    logger.info(
+      { inboxRowId: row.id, outboundId: matched.outboundId, method: matched.method },
+      "match: bounce written",
+    );
     return;
   }
 
-  if (matched.outboundId && matched.notionPageId) {
-    await markInboxMatched(row.id, matched.outboundId, "matched");
-    await upsertConversation(row.conversationId, matched.notionPageId, row.id, row.receivedAt);
+  if (!matched.outboundId) return;
 
-    // Receiving mailbox = the local mailbox that ingested this inbound. Resolve
-    // it lazily here (the schema already knows mailboxId -> email).
+  let headers: Array<{ name: string; value: string }> = [];
+  if (mailboxEmail) {
+    try {
+      headers = await getMessageInternetHeaders(mailboxEmail, row.graphMessageId);
+    } catch (err) {
+      logger.warn({ err, inboxRowId: row.id }, "match: failed to fetch internetMessageHeaders; using subject/body only");
+    }
+  }
+  const replyKind = detectReplyKind({
+    subject: row.subject,
+    bodyPreview: row.bodyPreview,
+    headers,
+  });
+
+  if (replyKind.kind === "auto") {
+    await syncInboxCrmFromMatch(row.id, matched.outboundId, matched.notionPageId);
+    await markInboxMatched(row.id, matched.outboundId, "auto_reply");
+    await upsertConversation(row.conversationId, matched.notionPageId ?? null, row.id, row.receivedAt);
+    logger.info(
+      {
+        inboxRowId: row.id,
+        outboundId: matched.outboundId,
+        reason: replyKind.reason,
+        method: matched.method,
+      },
+      "match: auto-reply detected — skipped human-reply side effects",
+    );
+    return;
+  }
+
+  await applyOutboundThreadStatus(matched, bounce, row);
+  const { crm, ob } = await syncInboxCrmFromMatch(row.id, matched.outboundId, matched.notionPageId);
+  await markInboxMatched(row.id, matched.outboundId, "matched");
+  await upsertConversation(row.conversationId, matched.notionPageId ?? null, row.id, row.receivedAt);
+
+  try {
+    const humanMark = await markDtcEntityColdReachOnHumanReply(loadConfig(), {
+      ilNotionPageId: matched.notionPageId,
+      entityNotionUrl: crm.entityNotionUrl ?? ob?.entityNotionUrl,
+    });
+    if (humanMark.updated) {
+      logger.info(
+        {
+          notionPageId: matched.notionPageId,
+          entityPageId: humanMark.entityPageId,
+          status: humanMark.status,
+          source: humanMark.source,
+        },
+        "match: DTC Entity ColdReach Status set after human reply",
+      );
+    } else {
+      logger.warn(
+        {
+          notionPageId: matched.notionPageId,
+          outboundId: matched.outboundId,
+          source: humanMark.source,
+        },
+        "match: DTC Entity ColdReach Humen not updated (no entity page resolved)",
+      );
+    }
+  } catch (err) {
+    logger.error(
+      { err, notionPageId: matched.notionPageId, inboxRowId: row.id },
+      "match: DTC Entity Humen update failed after human reply",
+    );
+  }
+
+  if (matched.notionPageId) {
     const receivingMailbox = await emailForMailboxId(row.mailboxId);
 
     const newPageId = await createInboundReplyRow({
@@ -100,8 +307,6 @@ async function processMatch(job: Job<MatchJobData>): Promise<void> {
       receivedAt: row.receivedAt,
     });
 
-    // Best-effort: stamp Reply Status = Done on the original outbound row.
-    // Failure here is logged but must not block the child row from existing.
     await markOriginalReplyDone(matched.notionPageId).catch((err) =>
       logger.warn(
         { err, parentOutboundNotionPageId: matched.notionPageId },
@@ -115,8 +320,15 @@ async function processMatch(job: Job<MatchJobData>): Promise<void> {
         outboundId: matched.outboundId,
         newNotionPageId: newPageId,
         parentOutboundNotionPageId: matched.notionPageId,
+        method: matched.method,
+        replyKind: replyKind.kind,
       },
       "match: inbound-reply child row created",
+    );
+  } else {
+    logger.info(
+      { inboxRowId: row.id, outboundId: matched.outboundId, method: matched.method },
+      "match: inbound matched outbound with no Notion page — skipping Notion child row",
     );
   }
 }

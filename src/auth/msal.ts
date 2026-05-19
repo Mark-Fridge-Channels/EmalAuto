@@ -18,6 +18,7 @@ import {
   type AuthenticationResult,
 } from "@azure/msal-node";
 import { loadConfig, resolveAppKeyForMailbox } from "../config/index.js";
+import { getEffectiveGraphAppsSync } from "../config/graph-apps.runtime.js";
 import { logger } from "../utils/logger.js";
 
 export class MissingGraphAppError extends Error {
@@ -37,7 +38,7 @@ const cache = new Map<string, CachedToken>();
 
 function buildClientForApp(appKey: string): ConfidentialClientApplication {
   const cfg = loadConfig();
-  const app = cfg.graph_apps[appKey];
+  const app = getEffectiveGraphAppsSync(cfg)[appKey];
   if (!app) {
     throw new Error(`graph_apps["${appKey}"] not configured`);
   }
@@ -100,10 +101,22 @@ export async function acquireGraphTokenForApp(
   }
   cache.set(appKey, { accessToken: result.accessToken, expiresOn: result.expiresOn });
   logger.info(
-    { app: appKey, expiresOn: result.expiresOn.toISOString(), tenantId: cfg.graph_apps[appKey]?.tenant_id },
+    {
+      app: appKey,
+      expiresOn: result.expiresOn.toISOString(),
+      tenantId: getEffectiveGraphAppsSync(cfg)[appKey]?.tenant_id,
+    },
     "graph app token acquired",
   );
   return result.accessToken;
+}
+
+/** Drop cached MSAL clients + tokens for the given app keys (after DB graph_apps hot reload). */
+export function evictGraphAppClients(appKeys: string[]): void {
+  for (const k of appKeys) {
+    clients.delete(k);
+    cache.delete(k);
+  }
 }
 
 /**
@@ -122,6 +135,7 @@ export async function acquireGraphTokenForMailbox(
 /** Drop the in-process cache (all apps). Useful for tests / forced rotation. */
 export function clearTokenCache(): void {
   cache.clear();
+  clients.clear();
 }
 
 /** Inspect the cache snapshot (for /health). */

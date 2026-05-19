@@ -7,7 +7,7 @@
 
 import { db } from "../db/client.js";
 import { outboundMessages, type NewOutboundMessage, type OutboundMessage } from "../db/schema/outbound_messages.js";
-import { eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 
 export async function recordOutbound(row: NewOutboundMessage): Promise<OutboundMessage> {
   const [inserted] = await db.insert(outboundMessages).values(row).returning();
@@ -26,6 +26,28 @@ export async function findOutboundByPage(notionPageId: string): Promise<Outbound
     .select()
     .from(outboundMessages)
     .where(eq(outboundMessages.notionPageId, notionPageId));
+}
+
+export async function findOutboundById(id: number): Promise<OutboundMessage | undefined> {
+  const rows = await db.select().from(outboundMessages).where(eq(outboundMessages.id, id)).limit(1);
+  return rows[0];
+}
+
+/** Newest outbound in the same Graph conversation + mailbox (for inbox ingest CRM prefill). */
+export async function findNewestOutboundByConversation(
+  conversationId: string,
+  mailboxId: number,
+): Promise<OutboundMessage | undefined> {
+  if (!conversationId.trim()) return undefined;
+  const rows = await db
+    .select()
+    .from(outboundMessages)
+    .where(
+      and(eq(outboundMessages.conversationId, conversationId), eq(outboundMessages.mailboxId, mailboxId)),
+    )
+    .orderBy(desc(outboundMessages.sentAt))
+    .limit(1);
+  return rows[0];
 }
 
 export async function markOutboundBounce(

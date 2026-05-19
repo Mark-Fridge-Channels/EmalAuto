@@ -7,8 +7,10 @@
  */
 
 import { loadConfig, printConfigSummary } from "./config/index.js";
+import { getEffectiveGraphAppsSync } from "./config/graph-apps.runtime.js";
 import { logger } from "./utils/logger.js";
 import { auditMailboxesAgainstApps } from "./db/repositories/mailbox.repo.js";
+import { refreshGraphAppsFromDb } from "./services/graph-apps.service.js";
 import { startSendWorker, stopSendWorker } from "./workers/send.worker.js";
 import { startInboxScheduler, startInboxWorker, stopInbox } from "./workers/inbox.worker.js";
 import { startMatchWorker, stopMatchWorker } from "./workers/match.worker.js";
@@ -19,6 +21,13 @@ import { startV2Maintenance, stopV2Maintenance } from "./workers/v2-maintenance.
 async function main(): Promise<void> {
   const cfg = loadConfig();
   printConfigSummary();
+  if (cfg.graph_apps_source === "db") {
+    await refreshGraphAppsFromDb();
+    if (Object.keys(getEffectiveGraphAppsSync(cfg)).length === 0) {
+      console.error("GRAPH_APPS_SOURCE=db but graph_apps has no enabled rows");
+      process.exit(2);
+    }
+  }
   await auditMailboxesAgainstApps();
 
   startTokenWarmer();

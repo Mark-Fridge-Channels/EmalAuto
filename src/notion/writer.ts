@@ -24,6 +24,7 @@ import {
   notionEmail,
   notionRichText,
   notionSelect,
+  notionStatus,
   notionTitle,
   statusOrSelect,
 } from "./property-mapper.js";
@@ -239,6 +240,7 @@ export async function createInboundReplyRow(row: InboundReplyRow): Promise<strin
   const titleText = `[Inbound Reply] ${row.subject || "(no subject)"}`.slice(0, 1900);
   const payloadObj = {
     actionType: "inbound_reply" as const,
+    replyKind: "human" as const,
     replyToGraphMessageId: row.replyAnchorGraphMessageId,
     conversationId: row.conversationId,
     internetMessageId: row.internetMessageId ?? null,
@@ -286,4 +288,75 @@ export async function markOriginalReplyDone(parentOutboundNotionPageId: string):
   await updatePage(parentOutboundNotionPageId, {
     [replyStatusCol]: statusOrSelect(replyStatusProp, cfg.notion.reply_status_values.done),
   });
+}
+
+function stripHtml(html: string): string {
+  return String(html ?? "")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export interface WebReplyNotionDraft {
+  receivingMailbox: string;
+  counterpartyEmail: string;
+  subject: string;
+  bodyHtml: string;
+  replyAnchorGraphMessageId: string;
+  conversationId: string;
+  /** When known, links the manual reply to the original outbound Notion task. */
+  parentOutboundNotionPageId: string | null;
+}
+
+/**
+ * Creates a **Success** Notion row (Action = Reply Email) so the poller never
+ * enqueues it, then the caller sends via Graph and runs `writeSendSuccess`.
+ */
+export async function createWebReplyNotionPage(draft: WebReplyNotionDraft): Promise<string> {
+  const cfg = loadConfig();
+  const p = cfg.notion.property_names;
+  const titleColName = await getTitlePropertyName();
+  const now = new Date();
+  const dbMeta = await retrieveDatabase(cfg.notion.database_id);
+  const statusCol = p.Status;
+  const statusType = (dbMeta.properties[statusCol] as { type?: string } | undefined)?.type;
+  const statusPayload =
+    statusType === "status"
+      ? notionStatus(cfg.notion.status_values.success)
+      : notionSelect(cfg.notion.status_values.success);
+
+  const plainBody = stripHtml(draft.bodyHtml).slice(0, 1990);
+  const payloadObj = {
+    actionType: "web_console_reply" as const,
+    replyToGraphMessageId: draft.replyAnchorGraphMessageId,
+    conversationId: draft.conversationId,
+    to_email: draft.counterpartyEmail,
+    fromMailbox: draft.receivingMailbox,
+    ...(draft.parentOutboundNotionPageId
+      ? { parentOutboundNotionPageId: draft.parentOutboundNotionPageId }
+      : {}),
+  };
+  const taskId = `webreply__${draft.replyAnchorGraphMessageId}__${now.getTime()}`;
+
+  const properties: Record<string, unknown> = {
+    [titleColName]: notionTitle(`[Web Reply] ${(draft.subject || "(no subject)").slice(0, 1800)}`),
+    [p.Action]: notionSelect(cfg.notion.action_values.reply),
+    [statusCol]: statusPayload,
+    [p.Platform]: notionSelect(cfg.notion.platform_value),
+    [p.InNOut]: notionSelect(cfg.notion.in_n_out_value),
+    [p.sender_email]: notionRichText(draft.receivingMailbox),
+    [p.subject]: notionRichText(draft.subject.slice(0, 1900)),
+    [p.body]: notionRichText(plainBody || "(empty)"),
+    [p.reply_email]: notionEmail(draft.counterpartyEmail),
+    [p.last_reply_time]: notionDateTimeAsiaShanghai(now),
+    [p.payload]: notionRichText(JSON.stringify(payloadObj)),
+    [p.task_id]: notionRichText(taskId),
+    [p.trigger_time]: notionDateTimeAsiaShanghai(now),
+  };
+
+  const created = await createPageInDatabase(cfg.notion.database_id, properties);
+  logger.info({ newNotionPageId: created.id }, "web reply: notion row created (pre-send, Success)");
+  return created.id;
 }

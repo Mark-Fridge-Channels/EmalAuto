@@ -5,6 +5,8 @@
 
 import { matchQueue } from "../queues/queues.js";
 import { insertInboxIfNew } from "../db/repositories/inbox.repo.js";
+import { crmSnapshotFromOutbound } from "../notion/crm-snapshot.js";
+import { findNewestOutboundByConversation } from "./message-store.service.js";
 import type { InboxMessageSlim } from "../graph/mail.service.js";
 
 function extractFromEmail(m: InboxMessageSlim): string {
@@ -31,6 +33,9 @@ export async function ingestInboxMessageBatch(
     const receivedAt = new Date(m.receivedDateTime);
     if (!maxReceivedAt || receivedAt > maxReceivedAt) maxReceivedAt = receivedAt;
 
+    const outbound = await findNewestOutboundByConversation(m.conversationId, mailboxId);
+    const crm = crmSnapshotFromOutbound(outbound);
+
     const inserted = await insertInboxIfNew({
       mailboxId,
       folder,
@@ -47,6 +52,11 @@ export async function ingestInboxMessageBatch(
       bodyPreview: m.bodyPreview ?? "",
       rawJson: m as any,
       matchStatus: "unmatched",
+      keyPersonId: crm.keyPersonId,
+      keyPersonName: crm.keyPersonName,
+      keyPersonNotionUrl: crm.keyPersonNotionUrl,
+      entityName: crm.entityName,
+      entityNotionUrl: crm.entityNotionUrl,
     });
     if (!inserted) continue;
     written += 1;

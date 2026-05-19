@@ -11,6 +11,7 @@
 
 import { loadConfig } from "../config/index.js";
 import { getPage } from "../notion/client.js";
+import { resolveDtcOutboundSend, type DtcSendBundle } from "../notion/dtc-send.js";
 import {
   buildPropertyResolver,
   normalizeEmail,
@@ -26,6 +27,8 @@ export interface BuiltSendJob {
   draft: OutboundDraft;
   /** `send` or `reply` — preserved for future reply-flow logic. */
   actionType: "send" | "reply" | "unknown";
+  /** Set when Action = Send Email and DTC gate + recipient resolve succeeded. */
+  dtc?: DtcSendBundle;
 }
 
 export async function buildSendJobFromNotion(notionPageId: string): Promise<BuiltSendJob> {
@@ -102,5 +105,14 @@ export async function buildSendJobFromNotion(notionPageId: string): Promise<Buil
     ...(replyToGraphMessageId ? { replyToGraphMessageId } : {}),
   };
 
-  return { notionPageId, draft, actionType };
+  let dtc: DtcSendBundle | undefined;
+  if (actionType === "send") {
+    const resolved = await resolveDtcOutboundSend(page, cfg);
+    if (resolved.ok) {
+      dtc = resolved.bundle;
+      draft.to = [resolved.bundle.recipientEmail];
+    }
+  }
+
+  return { notionPageId, draft, actionType, ...(dtc ? { dtc } : {}) };
 }

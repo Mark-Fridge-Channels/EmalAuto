@@ -7,6 +7,7 @@
  */
 
 import { loadConfig } from "../config/index.js";
+import { getEffectiveGraphAppsSync } from "../config/graph-apps.runtime.js";
 import { logger } from "../utils/logger.js";
 import { acquireGraphTokenForApp } from "./msal.js";
 
@@ -16,7 +17,8 @@ export function startTokenWarmer(): void {
   if (timer) return;
   const cfg = loadConfig();
   const tick = async (): Promise<void> => {
-    const apps = Object.keys(loadConfig().graph_apps);
+    const cfg = loadConfig();
+    const apps = Object.keys(getEffectiveGraphAppsSync(cfg));
     for (const appKey of apps) {
       try {
         await acquireGraphTokenForApp(appKey);
@@ -28,7 +30,10 @@ export function startTokenWarmer(): void {
   void tick();
   const period = Math.max(60_000, Math.floor(cfg.polling.token_warm_skew_ms / 2));
   timer = setInterval(() => void tick(), period);
-  logger.info({ periodMs: period, apps: Object.keys(cfg.graph_apps).length }, "token warmer started");
+  logger.info(
+    { periodMs: period, apps: Object.keys(getEffectiveGraphAppsSync(cfg)).length },
+    "token warmer started",
+  );
 }
 
 export async function stopTokenWarmer(): Promise<void> {

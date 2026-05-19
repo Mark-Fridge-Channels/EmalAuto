@@ -4,7 +4,7 @@
  * Spec reference: https://learn.microsoft.com/graph/api/user-sendmail
  */
 
-import { graphFetch, GraphApiError } from "./client.js";
+import { graphFetch, graphFetchAbsolute, GraphApiError, graphFetchBinary } from "./client.js";
 
 export interface OutboundDraft {
   /** Sender mailbox UPN / SMTP address. */
@@ -34,6 +34,13 @@ export interface OutboundDraft {
  *
  * Docs: https://learn.microsoft.com/graph/api/message-createreply
  */
+function graphRecipientList(addrs: string[] | undefined): { emailAddress: { address: string } }[] {
+  return (addrs ?? [])
+    .map((a) => a.trim())
+    .filter(Boolean)
+    .map((address) => ({ emailAddress: { address } }));
+}
+
 export async function sendMailReplyInThread(params: {
   fromMailbox: string;
   replyToMessageId: string;
@@ -41,8 +48,12 @@ export async function sendMailReplyInThread(params: {
   isHtml?: boolean;
   /** If non-empty, applied to the draft before send (otherwise Graph keeps "Re: …"). */
   subject?: string;
+  /** Extra Cc on the reply draft (Graph `ccRecipients`). */
+  cc?: string[];
+  /** Extra Bcc on the reply draft (Graph `bccRecipients`). */
+  bcc?: string[];
 }): Promise<SentItemsLookupHit> {
-  const { fromMailbox, replyToMessageId, bodyHtml, isHtml, subject } = params;
+  const { fromMailbox, replyToMessageId, bodyHtml, isHtml, subject, cc, bcc } = params;
   const encUser = encodeURIComponent(fromMailbox);
   const encParent = encodeURIComponent(replyToMessageId);
 
@@ -58,17 +69,23 @@ export async function sendMailReplyInThread(params: {
   }
   const encDraft = encodeURIComponent(draftId);
 
+  const ccRecipients = graphRecipientList(cc);
+  const bccRecipients = graphRecipientList(bcc);
+  const patch: Record<string, unknown> = {
+    body: {
+      contentType: isHtml === false ? "Text" : "HTML",
+      content: bodyHtml,
+    },
+  };
+  if (subject?.trim()) patch.subject = subject.trim();
+  if (ccRecipients.length) patch.ccRecipients = ccRecipients;
+  if (bccRecipients.length) patch.bccRecipients = bccRecipients;
+
   await graphFetch({
     method: "PATCH",
     actorMailbox: fromMailbox,
     path: `/users/${encUser}/messages/${encDraft}`,
-    body: {
-      body: {
-        contentType: isHtml === false ? "Text" : "HTML",
-        content: bodyHtml,
-      },
-      ...(subject && subject.trim() ? { subject: subject.trim() } : {}),
-    },
+    body: patch,
   });
 
   await graphFetch({
@@ -195,6 +212,153 @@ export async function findRecentSentMessage(
   return null;
 }
 
+type GraphMessageList = { value?: any[]; "@odata.nextLink"?: string };
+
+function hitFromSentItem(m: any, subject: string, targetTo: string): boolean {
+  const msgSubj: string = m.subject ?? "";
+  if (msgSubj !== subject) return false;
+  const tos: string[] = (m.toRecipients ?? []).map((r: any) =>
+    String(r?.emailAddress?.address ?? "").toLowerCase(),
+  );
+  if (targetTo && !tos.includes(targetTo)) return false;
+  return true;
+}
+
+/**
+ * Scan Sent Items newest-first with **no** sentDateTime filter (subject + To must still match exactly).
+ * Stops after `maxMessages` rows read across pages (Graph does not allow unbounded listing).
+ */
+async function scanSentItemsNewestFirst(
+  fromMailbox: string,
+  subject: string,
+  toEmail: string,
+  center: Date,
+  maxMessages: number,
+): Promise<SentItemsLookupHit | null> {
+  const select = "id,internetMessageId,conversationId,sentDateTime,subject,toRecipients";
+  const pageSize = 100;
+  const path = `/users/${encodeURIComponent(fromMailbox)}/mailFolders/sentitems/messages`;
+  const targetTo = toEmail.trim().toLowerCase();
+  const centerMs = center.getTime();
+  let best: { m: any; dist: number } | null = null;
+  let scanned = 0;
+  let nextUrl: string | undefined;
+
+  for (;;) {
+    const data: GraphMessageList = nextUrl
+      ? await graphFetchAbsolute<GraphMessageList>(nextUrl, { actorMailbox: fromMailbox })
+      : await graphFetch<GraphMessageList>({
+          method: "GET",
+          actorMailbox: fromMailbox,
+          path,
+          query: {
+            $select: select,
+            $orderby: "sentDateTime desc",
+            $top: pageSize,
+          },
+        });
+
+    for (const m of data?.value ?? []) {
+      if (scanned >= maxMessages) break;
+      scanned += 1;
+      if (!hitFromSentItem(m, subject, targetTo)) continue;
+      const sentMs = new Date(m.sentDateTime ?? 0).getTime();
+      if (Number.isNaN(sentMs)) continue;
+      const dist = Math.abs(sentMs - centerMs);
+      if (!best || dist < best.dist) best = { m, dist };
+    }
+
+    if (scanned >= maxMessages) break;
+    nextUrl = data?.["@odata.nextLink"];
+    if (!nextUrl) break;
+  }
+
+  if (!best) return null;
+  const m = best.m;
+  return {
+    graphMessageId: m.id,
+    internetMessageId: m.internetMessageId ?? null,
+    conversationId: m.conversationId,
+    sentAt: m.sentDateTime,
+    subject: m.subject,
+  };
+}
+
+export interface FindSentMessageNearDateOptions {
+  /**
+   * Search radius in hours on **each side** of `center` (total span ≈ 2 × this value).
+   * Use **0** to disable the sentDateTime filter and scan Sent Items newest-first
+   * up to `maxMessagesToScan` messages (still subject + To exact match).
+   */
+  windowHours?: number;
+  /** Max rows returned in the single Graph request when using a time filter. Default 100. */
+  top?: number;
+  /** When `windowHours` is 0: stop after scanning this many messages across pages. Default 5000. */
+  maxMessagesToScan?: number;
+}
+
+/**
+ * Historical backfill: locate a Sent Items message near a known send time
+ * (e.g. Notion Completion Time). Subject + first To must match exactly (same
+ * limitation as {@link findRecentSentMessage}).
+ */
+export async function findSentMessageNearDate(
+  fromMailbox: string,
+  subject: string,
+  toEmail: string,
+  center: Date,
+  options?: FindSentMessageNearDateOptions,
+): Promise<SentItemsLookupHit | null> {
+  const windowHours = options?.windowHours ?? 72;
+  const top = options?.top ?? 100;
+  const maxMessagesToScan = Math.max(100, options?.maxMessagesToScan ?? 5000);
+
+  if (windowHours <= 0) {
+    return scanSentItemsNewestFirst(fromMailbox, subject, toEmail, center, maxMessagesToScan);
+  }
+
+  const halfMs = Math.max(1, windowHours) * 3600 * 1000;
+  const startIso = new Date(center.getTime() - halfMs).toISOString();
+  const endIso = new Date(center.getTime() + halfMs).toISOString();
+  const filter = `sentDateTime ge ${startIso} and sentDateTime le ${endIso}`;
+  const select =
+    "id,internetMessageId,conversationId,sentDateTime,subject,toRecipients";
+
+  const data = await graphFetch<GraphMessageList>({
+    method: "GET",
+    actorMailbox: fromMailbox,
+    path: `/users/${encodeURIComponent(fromMailbox)}/mailFolders/sentitems/messages`,
+    query: {
+      $filter: filter,
+      $select: select,
+      $orderby: "sentDateTime desc",
+      $top: top,
+    },
+  });
+
+  const targetTo = toEmail.trim().toLowerCase();
+  const centerMs = center.getTime();
+  let best: { m: any; dist: number } | null = null;
+
+  for (const m of data?.value ?? []) {
+    if (!hitFromSentItem(m, subject, targetTo)) continue;
+    const sentMs = new Date(m.sentDateTime ?? 0).getTime();
+    if (Number.isNaN(sentMs)) continue;
+    const dist = Math.abs(sentMs - centerMs);
+    if (!best || dist < best.dist) best = { m, dist };
+  }
+
+  if (!best) return null;
+  const m = best.m;
+  return {
+    graphMessageId: m.id,
+    internetMessageId: m.internetMessageId ?? null,
+    conversationId: m.conversationId,
+    sentAt: m.sentDateTime,
+    subject: m.subject,
+  };
+}
+
 export interface InboxPullParams {
   mailbox: string;
   folder: string;
@@ -261,4 +425,115 @@ export async function getMessageById(
     if (e instanceof GraphApiError && e.status === 404) return null;
     throw e;
   }
+}
+
+/** Internet headers for auto-reply detection (match worker only — extra Graph round-trip). */
+export async function getMessageInternetHeaders(
+  mailboxKey: string,
+  messageId: string,
+): Promise<Array<{ name: string; value: string }>> {
+  try {
+    const data = await graphFetch<{
+      internetMessageHeaders?: Array<{ name?: string; value?: string }>;
+    }>({
+      method: "GET",
+      actorMailbox: mailboxKey,
+      path: `/users/${encodeURIComponent(mailboxKey)}/messages/${encodeURIComponent(messageId)}`,
+      query: { $select: "internetMessageHeaders" },
+    });
+    return (data.internetMessageHeaders ?? []).map((h) => ({
+      name: String(h.name ?? ""),
+      value: String(h.value ?? ""),
+    }));
+  } catch (e: unknown) {
+    if (e instanceof GraphApiError && e.status === 404) return [];
+    throw e;
+  }
+}
+
+export interface GraphMessageBody {
+  contentType?: string;
+  content?: string;
+}
+
+export interface GraphAttachmentMeta {
+  id: string;
+  name?: string;
+  contentType?: string;
+  size?: number;
+  isInline?: boolean;
+}
+
+/** Full message for admin UI (HTML body + attachment metadata). */
+export async function getMessageFullForAdmin(
+  mailbox: string,
+  messageId: string,
+): Promise<{
+  id: string;
+  subject?: string;
+  body?: GraphMessageBody;
+  hasAttachments?: boolean;
+  attachments: GraphAttachmentMeta[];
+} | null> {
+  try {
+    const data = await graphFetch<{
+      id: string;
+      subject?: string;
+      body?: GraphMessageBody;
+      hasAttachments?: boolean;
+    }>({
+      method: "GET",
+      actorMailbox: mailbox,
+      path: `/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(messageId)}`,
+      query: {
+        $select: "id,subject,body,hasAttachments",
+      },
+    });
+    let attachments: GraphAttachmentMeta[] = [];
+    if (data.hasAttachments) {
+      const attData = await graphFetch<{ value?: GraphAttachmentMeta[] }>({
+        method: "GET",
+        actorMailbox: mailbox,
+        path: `/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(messageId)}/attachments`,
+        query: { $select: "id,name,contentType,size,isInline" },
+      });
+      attachments = attData.value ?? [];
+    }
+    return { ...data, attachments };
+  } catch (e: unknown) {
+    if (e instanceof GraphApiError && e.status === 404) return null;
+    throw e;
+  }
+}
+
+export async function downloadAttachmentBytes(params: {
+  mailbox: string;
+  messageId: string;
+  attachmentId: string;
+}): Promise<{ buffer: Buffer; contentType: string; filename: string }> {
+  const { mailbox, messageId, attachmentId } = params;
+  /** Do not use a narrow `$select`: Graph must return `@odata.type` so we only call `/$value` for fileAttachment. */
+  const meta = await graphFetch<Record<string, unknown>>({
+    method: "GET",
+    actorMailbox: mailbox,
+    path: `/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`,
+  });
+  const odataType = String(meta["@odata.type"] ?? "");
+  if (!odataType.toLowerCase().includes("fileattachment")) {
+    throw new GraphApiError(
+      `Attachment download only supports #microsoft.graph.fileAttachment; got ${odataType || "(missing @odata.type)"}`,
+      415,
+      "unsupportedAttachmentType",
+      meta,
+    );
+  }
+  const path = `/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}/$value`;
+  const buffer = await graphFetchBinary({ path, actorMailbox: mailbox });
+  const name = typeof meta.name === "string" ? meta.name : undefined;
+  const contentType = typeof meta.contentType === "string" ? meta.contentType : undefined;
+  return {
+    buffer,
+    contentType: contentType || "application/octet-stream",
+    filename: name || "attachment",
+  };
 }

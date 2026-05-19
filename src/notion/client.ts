@@ -2,7 +2,7 @@
  * Notion HTTP client.
  *
  * Implements the same shape as minimal-server/notion.js (no SDK), so we keep:
- * - 429 with Retry-After + exponential backoff
+ * - 429 / 502 / 503 / 504 with Retry-After or exponential backoff
  * - global serialization (≈3 req/s rate cap)
  * - hyphenation of 32-char IDs
  *
@@ -85,13 +85,17 @@ async function notionFetch<T>(opts: NotionFetchOptions): Promise<T> {
       data = { raw: text };
     }
     if (!res.ok) {
-      // 429: respect Retry-After or exponential backoff up to 5 attempts.
-      if (res.status === 429 && attempt < 5) {
+      const maxAttempts = 6;
+      const retryable = res.status === 429 || res.status === 502 || res.status === 503 || res.status === 504;
+      if (retryable && attempt < maxAttempts) {
         const retryAfter = parseInt(res.headers.get("retry-after") ?? "", 10);
-        const backoff = Number.isFinite(retryAfter) && retryAfter > 0
-          ? retryAfter * 1000
-          : Math.min(8000, 500 * 2 ** attempt);
-        logger.warn({ path, attempt, backoff }, "notion 429, backing off");
+        const cap = res.status === 504 ? 45_000 : 12_000;
+        const base = res.status === 504 ? 3000 : 500;
+        const backoff =
+          Number.isFinite(retryAfter) && retryAfter > 0
+            ? retryAfter * 1000
+            : Math.min(cap, base * 2 ** attempt);
+        logger.warn({ path, status: res.status, attempt, backoff }, "notion transient error, backing off");
         await sleep(backoff);
         return notionFetch<T>({ ...opts, attempt: attempt + 1 });
       }

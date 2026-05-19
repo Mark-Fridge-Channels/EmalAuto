@@ -40,12 +40,20 @@ export const inboxMessages = pgTable(
     /** matched | bounce | ignored | unmatched */
     matchStatus: text("match_status").notNull().default("unmatched"),
     matchedOutboundId: integer("matched_outbound_id"),
+    /** Optional CRM fields copied from parent Notion outbound when matched. */
+    keyPersonId: text("key_person_id"),
+    keyPersonName: text("key_person_name"),
+    keyPersonNotionUrl: text("key_person_notion_url"),
+    entityName: text("entity_name"),
+    entityNotionUrl: text("entity_notion_url"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({
     msgUniq: uniqueIndex("inbox_msg_uniq").on(t.mailboxId, t.graphMessageId),
     convIdx: index("inbox_conversation_idx").on(t.conversationId),
     mailboxRecvIdx: index("inbox_mailbox_recv_idx").on(t.mailboxId, t.receivedAt),
+    entityIdx: index("inbox_entity_name_idx").on(t.entityName),
+    keyPersonIdx: index("inbox_key_person_id_idx").on(t.keyPersonId),
   }),
 );
 

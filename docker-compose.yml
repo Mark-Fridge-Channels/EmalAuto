@@ -1,0 +1,25 @@
+# One command: docker compose up --build -d
+# - api:  Fastify（健康检查、管理台 + web/dist、Notion poller）
+# - worker: BullMQ 消费（发信 / 收信 / 匹配等）
+#
+# 配置：复制 .env.example → .env，按需填写；compose 会注入两个服务。
+# 首次建库：docker compose run --rm api npm run db:migrate
+
+services:
+  api:
+    image: emal-auto:latest
+    build: .
+    command: ["node", "dist/server.js"]
+    ports:
+      - "${SERVER_PORT:-3737}:${SERVER_PORT:-3737}"
+    env_file:
+      - .env
+    restart: unless-stopped
+
+  worker:
+    image: emal-auto:latest
+    build: .
+    command: ["node", "dist/worker.js"]
+    env_file:
+      - .env
+    restart: unless-stopped

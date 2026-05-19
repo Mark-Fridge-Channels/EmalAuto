@@ -17,10 +17,22 @@ import { registerGraphWebhookRoutes } from "./routes/webhook.graph.routes.js";
 import { startNotionPoller, stopNotionPoller } from "./notion/poller.js";
 import { auditMailboxesAgainstApps } from "./db/repositories/mailbox.repo.js";
 import { validateNotionSchema } from "./notion/schema-validator.js";
+import { registerAdminConsole } from "./routes/admin.routes.js";
+import { refreshGraphAppsFromDb } from "./services/graph-apps.service.js";
+import { getEffectiveGraphAppsSync } from "./config/graph-apps.runtime.js";
 
 async function main(): Promise<void> {
   const cfg = loadConfig();
   printConfigSummary(cfg);
+
+  if (cfg.graph_apps_source === "db") {
+    await refreshGraphAppsFromDb();
+    const keys = Object.keys(getEffectiveGraphAppsSync(cfg));
+    if (keys.length === 0) {
+      logger.error("GRAPH_APPS_SOURCE=db but `graph_apps` has no enabled rows — aborting boot");
+      process.exit(2);
+    }
+  }
 
   // Fail loudly if the Notion DB doesn't match the configured field map.
   // (Network/auth errors here ALSO fail loudly — caller can see the cause.)
@@ -44,6 +56,7 @@ async function main(): Promise<void> {
     },
   });
   await registerHealthRoutes(app);
+  await registerAdminConsole(app);
   if (cfg.v2.enabled) {
     await registerGraphWebhookRoutes(app);
   }

@@ -11,6 +11,8 @@ npm-debug.log*
 # Local config & secrets
 config.json
 .env
+graph-apps-seed*.sql
+*.generated.sql
 .env.local
 .env.*.local
 

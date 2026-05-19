@@ -176,3 +176,33 @@ export async function graphFetchAbsolute<T = unknown>(
     return text as unknown as T;
   }
 }
+
+/** Binary body (e.g. attachment `$value`). */
+export async function graphFetchBinary(opts: {
+  path: string;
+  actorMailbox: string;
+  attempt?: number;
+}): Promise<Buffer> {
+  const { path, actorMailbox, attempt = 0 } = opts;
+  const token = await acquireGraphTokenForMailbox(actorMailbox);
+  const url = buildUrl(path, undefined);
+
+  const res = await fetch(url, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+
+  if (res.status === 401 && attempt === 0) {
+    await acquireGraphTokenForMailbox(actorMailbox, { force: true });
+    return graphFetchBinary({ ...opts, attempt: attempt + 1 });
+  }
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new GraphApiError(`Graph binary error: HTTP ${res.status}`, res.status, "", text);
+  }
+
+  return Buffer.from(await res.arrayBuffer());
+}

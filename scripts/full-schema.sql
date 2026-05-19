@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS outbound_messages (
   internet_message_id text,
   conversation_id text NOT NULL,
   subject text NOT NULL DEFAULT '',
+  body text NOT NULL DEFAULT '',
   sent_at timestamptz NOT NULL,
   recipients_json jsonb NOT NULL DEFAULT '{}'::jsonb,
   meta_json jsonb NOT NULL DEFAULT '{}'::jsonb,
@@ -98,3 +99,22 @@ ALTER TABLE outbound_messages ENABLE ROW LEVEL SECURITY;
 ALTER TABLE inbox_messages ENABLE ROW LEVEL SECURITY;
 ALTER TABLE conversation_map ENABLE ROW LEVEL SECURITY;
 ALTER TABLE webhook_subscriptions ENABLE ROW LEVEL SECURITY;
+
+-- ---------------------------------------------------------------------------
+-- Web console: Graph apps in DB + CRM columns (see drizzle/0000_* migration)
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS graph_apps (
+  id serial PRIMARY KEY,
+  domain text NOT NULL,
+  tenant_id text NOT NULL,
+  client_id text NOT NULL,
+  client_secret text NOT NULL,
+  enabled boolean NOT NULL DEFAULT true,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS graph_apps_domain_uniq ON graph_apps (domain);
+
+-- outbound_messages / inbox_messages: optional CRM + nullable notion_page_id
+-- conversation_map.notion_page_id may be NULL when anchor outbound has no Notion page.

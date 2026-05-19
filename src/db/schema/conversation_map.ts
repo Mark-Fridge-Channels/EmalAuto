@@ -13,7 +13,8 @@ export const conversationMap = pgTable(
   {
     id: serial("id").primaryKey(),
     conversationId: text("conversation_id").notNull(),
-    notionPageId: text("notion_page_id").notNull(),
+    /** Null when the anchor outbound row has no Notion page (admin-only sends). */
+    notionPageId: text("notion_page_id"),
     /** Latest inbound row we've matched into this conversation. */
     latestInboxId: integer("latest_inbox_id"),
     latestInboundAt: timestamp("latest_inbound_at", { withTimezone: true }),

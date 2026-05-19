@@ -33,6 +33,16 @@ const REQUIRED_FIELDS: FieldSpec[] = [
   { semanticKey: "trigger_time", allowedTypes: ["date"] },
 ];
 
+const DTC_IL_FIELDS: Array<{
+  columnKey: "dtc_entity" | "dtc_key_person" | "current_status" | "target_status";
+  allowedTypes: string[];
+}> = [
+  { columnKey: "dtc_entity", allowedTypes: ["relation"] },
+  { columnKey: "dtc_key_person", allowedTypes: ["relation"] },
+  { columnKey: "current_status", allowedTypes: ["status", "select"] },
+  { columnKey: "target_status", allowedTypes: ["status", "select"] },
+];
+
 export interface SchemaIssue {
   semanticKey: string;
   configuredColumn: string;
@@ -65,6 +75,28 @@ export async function validateNotionSchema(): Promise<SchemaIssue[]> {
     if (!f.allowedTypes.includes(prop.type)) {
       issues.push({
         semanticKey: f.semanticKey,
+        configuredColumn: colName,
+        reason: "wrong_type",
+        actualType: prop.type,
+        allowedTypes: f.allowedTypes,
+      });
+    }
+  }
+
+  for (const f of DTC_IL_FIELDS) {
+    const colName = cfg.notion.dtc.il_columns[f.columnKey];
+    const prop = db.properties[colName];
+    if (!prop) {
+      issues.push({
+        semanticKey: `dtc.${f.columnKey}`,
+        configuredColumn: colName,
+        reason: "missing",
+      });
+      continue;
+    }
+    if (!f.allowedTypes.includes(prop.type)) {
+      issues.push({
+        semanticKey: `dtc.${f.columnKey}`,
         configuredColumn: colName,
         reason: "wrong_type",
         actualType: prop.type,

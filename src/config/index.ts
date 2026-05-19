@@ -19,6 +19,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { config as dotenvConfig } from "dotenv";
 import { z } from "zod";
+import { getEffectiveGraphAppsSync } from "./graph-apps.runtime.js";
 
 // ---------- env file loading ----------
 
@@ -101,11 +102,45 @@ const propertyNamesSchema = z.object({
   task_id: z.string().min(1),
 });
 
+const notionDtcSchema = z.object({
+  il_columns: z.object({
+    dtc_entity: z.string().min(1),
+    dtc_key_person: z.string().min(1),
+    current_status: z.string().min(1),
+    target_status: z.string().min(1),
+  }),
+  entity_columns: z.object({
+    cold_reach_status: z.string().min(1),
+  }),
+  key_person_columns: z.object({
+    email: z.string().min(1),
+    email_verified_status: z.string().min(1),
+  }),
+  key_person_email_verified_value: z.string().min(1),
+  /** DTC Entity ColdReach Status written when a **human** inbound reply is matched. */
+  human_reply_cold_reach_status: z.string().min(1),
+  /** Columns on linked DTC Key Person / Entity pages → PG CRM fields. */
+  sync_columns: z.object({
+    kp_id_prop: z.string(),
+    kp_name_prop: z.string(),
+    entity_name_prop: z.string(),
+  }),
+});
+
 const notionSchema = z.object({
   token: z.string().min(1),
   database_id: z.string().min(1),
   notion_version: z.string().min(1),
   property_names: propertyNamesSchema,
+  dtc: notionDtcSchema,
+  /** Optional Notion column names to copy KeyPerson / Entity into PG (empty = skip). */
+  crm_columns: z.object({
+    key_person_id: z.string(),
+    key_person_name: z.string(),
+    key_person_url: z.string(),
+    entity_name: z.string(),
+    entity_url: z.string(),
+  }),
   status_values: z.object({
     todo: z.string().min(1),
     in_flight: z.string().min(1),
@@ -193,9 +228,20 @@ const v2Schema = z
     }
   });
 
+const adminUISchema = z.object({
+  /** When true, `/api/*` admin + static web UI are registered (requires `ui_password`). */
+  enabled: z.boolean(),
+  ui_password: z.string(),
+  /** Used to sign session cookies (min 16 chars). */
+  session_secret: z.string().min(16),
+  /** Session cookie lifetime in milliseconds (`@fastify/session` uses ms, not seconds). */
+  session_max_age_ms: z.number().int().min(60_000).max(365 * 24 * 60 * 60 * 1000),
+});
+
 export const configSchema = z
   .object({
     notion: notionSchema,
+    graph_apps_source: z.enum(["env", "db"]),
     graph_apps: z.record(z.string().min(1), graphAppSchema),
     graph_defaults: z.object({
       scopes: z.array(z.string().min(1)),
@@ -208,14 +254,15 @@ export const configSchema = z
     server: serverSchema,
     logging: loggingSchema,
     v2: v2Schema,
+    admin: adminUISchema,
   })
   .superRefine((c, ctx) => {
     const keys = Object.keys(c.graph_apps);
-    if (keys.length === 0) {
+    if (c.graph_apps_source === "env" && keys.length === 0) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["graph_apps"],
-        message: "graph_apps must contain at least one entry (set GRAPH_APP_1_DOMAIN, ...)",
+        message: "graph_apps must contain at least one entry when GRAPH_APPS_SOURCE=env (set GRAPH_APP_1_DOMAIN, ...)",
       });
     }
     for (const k of keys) {
@@ -233,7 +280,7 @@ export type AppConfig = z.infer<typeof configSchema>;
 
 // ---------- indexed group scanners ----------
 
-function readGraphApps(): Record<string, { tenant_id: string; client_id: string; client_secret: string }> {
+function readGraphAppsFromEnv(): Record<string, { tenant_id: string; client_id: string; client_secret: string }> {
   const out: Record<string, { tenant_id: string; client_id: string; client_secret: string }> = {};
   for (let i = 1; i < 100; i++) {
     const domain = process.env[`GRAPH_APP_${i}_DOMAIN`];
@@ -255,11 +302,23 @@ export function loadConfig(): AppConfig {
   if (cached) return cached;
   ensureEnvLoaded();
 
+  const graphAppsSourceRaw = envStr("GRAPH_APPS_SOURCE", "env").toLowerCase();
+  const graph_apps_source = graphAppsSourceRaw === "db" ? "db" : "env";
+  const adminPassword = envStr("ADMIN_UI_PASSWORD", "");
+  const sessionSecret = envStr("ADMIN_SESSION_SECRET", "dev-change-me-32chars-minimum!");
+
   const raw = {
     notion: {
       token: envRequired("NOTION_TOKEN"),
       database_id: envRequired("NOTION_DATABASE_ID"),
       notion_version: envStr("NOTION_VERSION", "2022-06-28"),
+      crm_columns: {
+        key_person_id: envStr("NOTION_COL_KEYPERSON_ID", ""),
+        key_person_name: envStr("NOTION_COL_KEYPERSON_NAME", ""),
+        key_person_url: envStr("NOTION_COL_KEYPERSON_URL", ""),
+        entity_name: envStr("NOTION_COL_ENTITY_NAME", ""),
+        entity_url: envStr("NOTION_COL_ENTITY_URL", ""),
+      },
       property_names: {
         Status: envRequired("NOTION_COL_STATUS"),
         Action: envRequired("NOTION_COL_ACTION"),
@@ -295,8 +354,34 @@ export function loadConfig(): AppConfig {
       platform_value: envRequired("NOTION_PLATFORM_VALUE"),
       in_n_out_value: envRequired("NOTION_IN_N_OUT_VALUE"),
       in_n_out_inbound_value: envStr("NOTION_IN_N_OUT_INBOUND_VALUE", "In"),
+      dtc: {
+        il_columns: {
+          dtc_entity: envStr("NOTION_IL_DTC_ENTITY", "DTC Entity"),
+          dtc_key_person: envStr("NOTION_IL_DTC_KEY_PERSON", "DTC Key Person"),
+          current_status: envStr("NOTION_IL_CURRENT_STATUS", "Current Status"),
+          target_status: envStr("NOTION_IL_TARGET_STATUS", "Target Status"),
+        },
+        entity_columns: {
+          cold_reach_status: envStr("NOTION_DTC_ENTITY_COL_COLD_REACH", "ColdReach Status"),
+        },
+        key_person_columns: {
+          email: envStr("NOTION_DTC_KP_COL_EMAIL", "Email"),
+          email_verified_status: envStr(
+            "NOTION_DTC_KP_COL_EMAIL_VERIFIED",
+            "Email Verified Status",
+          ),
+        },
+        key_person_email_verified_value: envStr("NOTION_DTC_KP_EMAIL_VERIFIED_VALUE", "Verified"),
+        human_reply_cold_reach_status: envStr("NOTION_DTC_HUMAN_REPLY_COLD_REACH", "Humen"),
+        sync_columns: {
+          kp_id_prop: envStr("NOTION_IL_SYNC_KP_ID_PROP", "ID"),
+          kp_name_prop: envStr("NOTION_IL_SYNC_KP_NAME_PROP", "name"),
+          entity_name_prop: envStr("NOTION_IL_SYNC_ENTITY_NAME_PROP", "Entity Name"),
+        },
+      },
     },
-    graph_apps: readGraphApps(),
+    graph_apps_source,
+    graph_apps: graph_apps_source === "db" ? {} : readGraphAppsFromEnv(),
     graph_defaults: {
       scopes: envCsv("GRAPH_SCOPES", ["https://graph.microsoft.com/.default"]),
       authority: envStr("GRAPH_AUTHORITY", "https://login.microsoftonline.com"),
@@ -337,6 +422,12 @@ export function loadConfig(): AppConfig {
       delta_sync_interval_ms: envInt("V2_DELTA_SYNC_INTERVAL_MS", 300_000),
       disable_polling_when_v2: envBool("V2_DISABLE_POLLING_WHEN_V2", false),
     },
+    admin: {
+      enabled: adminPassword.length > 0,
+      ui_password: adminPassword,
+      session_secret: sessionSecret,
+      session_max_age_ms: envInt("ADMIN_SESSION_MAX_AGE_DAYS", 30) * 24 * 60 * 60 * 1000,
+    },
   };
 
   const parsed = configSchema.parse(raw);
@@ -357,7 +448,8 @@ export function resolveAppKeyForMailbox(
   const at = mailboxEmail.lastIndexOf("@");
   if (at < 0) return null;
   const domain = mailboxEmail.slice(at + 1).toLowerCase();
-  return cfg.graph_apps[domain] ? domain : null;
+  const apps = getEffectiveGraphAppsSync(cfg);
+  return apps[domain] ? domain : null;
 }
 
 function mask(secret: string, head = 4, tail = 2): string {
@@ -383,8 +475,9 @@ export function printConfigSummary(cfg: AppConfig = loadConfig()): void {
   log("notion.database_id =", cfg.notion.database_id);
   log("notion.token       =", mask(cfg.notion.token, 6, 4));
   log("notion.version     =", cfg.notion.notion_version);
-  log("graph_apps.count   =", Object.keys(cfg.graph_apps).length);
-  for (const [domain, app] of Object.entries(cfg.graph_apps)) {
+  log("graph_apps_source  =", cfg.graph_apps_source);
+  log("graph_apps.count   =", Object.keys(getEffectiveGraphAppsSync(cfg)).length);
+  for (const [domain, app] of Object.entries(getEffectiveGraphAppsSync(cfg))) {
     log(
       `  - ${domain}: tenant=${app.tenant_id} client=${app.client_id} secret=${mask(app.client_secret)}`,
     );
@@ -405,6 +498,7 @@ export function printConfigSummary(cfg: AppConfig = loadConfig()): void {
   log("v2.client_state    =", cfg.v2.enabled ? mask(cfg.v2.subscription_client_state_secret, 4, 2) : "(n/a)");
   log("v2.disable_poll    =", cfg.v2.disable_polling_when_v2);
   log("v2.delta_interval_ms=", cfg.v2.delta_sync_interval_ms);
+  log("admin.ui_enabled     =", cfg.admin.enabled);
 }
 
 /** Test helper: drop the cached config so the next `loadConfig` re-reads env. */

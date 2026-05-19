@@ -18,10 +18,17 @@ import { logger } from "../utils/logger.js";
 import { getRedis } from "../queues/connection.js";
 import { QUEUE_NAMES, type SendJobData } from "../queues/queues.js";
 import { buildSendJobFromNotion } from "../services/job-builder.service.js";
+import { resolveDtcOutboundSend, updateDtcEntityColdReachAfterSend } from "../notion/dtc-send.js";
 import { findRecentSentMessage, sendMail, sendMailReplyInThread, type SentItemsLookupHit } from "../graph/mail.service.js";
 import { findMailboxByEmail } from "../db/repositories/mailbox.repo.js";
 import { recordOutbound } from "../services/message-store.service.js";
 import { markSending, writeSendFailure, writeSendSuccess } from "../notion/writer.js";
+import { getPage } from "../notion/client.js";
+import {
+  extractCrmFromDtcPageIds,
+  extractCrmFromInteractionLogPage,
+} from "../notion/crm-snapshot.js";
+import { updateOutboundCrmFields } from "../db/repositories/outbound.repo.js";
 import { sleep } from "../utils/sleep.js";
 
 let worker: Worker<SendJobData> | null = null;
@@ -53,8 +60,24 @@ async function process(job: Job<SendJobData>): Promise<void> {
     );
     return;
   }
+  if (built.actionType === "send" && !isReplyInThread) {
+    const cfg = loadConfig();
+    const ilPage = await getPage(notionPageId);
+    const dtcCheck = await resolveDtcOutboundSend(ilPage, cfg);
+    if (!dtcCheck.ok) {
+      await softFail(dtcCheck.reason);
+      return;
+    }
+    draft.to = [dtcCheck.bundle.recipientEmail];
+    built.dtc = dtcCheck.bundle;
+  }
+
   if (!isReplyInThread && draft.to.length === 0) {
-    await softFail("missing recipient (no Payload.to_email / Reply Email)");
+    await softFail(
+      built.actionType === "send"
+        ? "missing recipient (DTC Key Person Email / gate failed)"
+        : "missing recipient (no Payload.to_email / Reply Email)",
+    );
     return;
   }
   if (!isReplyInThread && !draft.subject) {
@@ -110,18 +133,32 @@ async function process(job: Job<SendJobData>): Promise<void> {
     }
 
     const sentAt = new Date(hit.sentAt);
-    await recordOutbound({
+    const inserted = await recordOutbound({
       mailboxId: mailbox.id,
       notionPageId,
       graphMessageId: hit.graphMessageId,
       internetMessageId: hit.internetMessageId,
       conversationId: hit.conversationId,
       subject: hit.subject,
+      body: draft.bodyHtml,
       sentAt,
       recipientsJson: { to: draft.to, cc: draft.cc ?? [], bcc: draft.bcc ?? [] } as any,
       metaJson: { actionType: built.actionType } as any,
       threadStatus: "sent",
     });
+
+    try {
+      const cfg = loadConfig();
+      const crm = built.dtc
+        ? await extractCrmFromDtcPageIds(cfg, {
+            entityPageId: built.dtc.entityPageId,
+            keyPersonPageId: built.dtc.keyPersonPageId,
+          })
+        : await extractCrmFromInteractionLogPage(await getPage(notionPageId), cfg);
+      await updateOutboundCrmFields(inserted.id, crm);
+    } catch (err) {
+      logger.warn({ err, notionPageId, outboundId: inserted.id }, "send: optional CRM snapshot failed");
+    }
 
     await writeSendSuccess(notionPageId, {
       graphMessageId: hit.graphMessageId,
@@ -129,6 +166,25 @@ async function process(job: Job<SendJobData>): Promise<void> {
       internetMessageId: hit.internetMessageId,
       sentAt,
     });
+
+    if (built.dtc && built.actionType === "send") {
+      try {
+        await updateDtcEntityColdReachAfterSend(built.dtc, loadConfig());
+        logger.info(
+          {
+            notionPageId,
+            entityPageId: built.dtc.entityPageId,
+            targetStatus: built.dtc.targetStatus,
+          },
+          "send: DTC Entity ColdReach Status updated",
+        );
+      } catch (err) {
+        logger.error(
+          { err, notionPageId, entityPageId: built.dtc.entityPageId },
+          "send: DTC Entity ColdReach update failed after successful send",
+        );
+      }
+    }
 
     logger.info(
       {

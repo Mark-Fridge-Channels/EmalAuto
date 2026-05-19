@@ -8,7 +8,7 @@ import { conversationMap, type ConversationMapRow } from "../schema/conversation
 
 export async function upsertConversation(
   conversationId: string,
-  notionPageId: string,
+  notionPageId: string | null,
   latestInboxId: number,
   latestInboundAt: Date,
 ): Promise<ConversationMapRow> {

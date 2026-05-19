@@ -9,11 +9,12 @@ import { pingDb } from "../db/client.js";
 import { pingRedis } from "../queues/connection.js";
 import { retrieveDatabase } from "../notion/client.js";
 import { loadConfig } from "../config/index.js";
+import { getEffectiveGraphAppsSync } from "../config/graph-apps.runtime.js";
 
 export async function registerHealthRoutes(app: FastifyInstance): Promise<void> {
   app.get("/health", async () => {
     const cfg = loadConfig();
-    const appKeys = Object.keys(cfg.graph_apps);
+    const appKeys = Object.keys(getEffectiveGraphAppsSync(cfg));
 
     const [dbOk, redisOk, notionOk, graphAppResults] = await Promise.all([
       pingDb(),
