@@ -1,10 +1,3 @@
-# One command: docker compose up --build -d
-# - api:  Fastify（健康检查、管理台 + web/dist、Notion poller）
-# - worker: BullMQ 消费（发信 / 收信 / 匹配等）
-#
-# 配置：复制 .env.example → .env，按需填写；compose 会注入两个服务。
-# 首次建库：docker compose run --rm api npm run db:migrate
-
 services:
   api:
     image: emal-auto:latest
@@ -15,6 +8,9 @@ services:
     env_file:
       - .env
     restart: unless-stopped
+    networks:
+      - default
+      - redis_net
 
   worker:
     image: emal-auto:latest
@@ -23,3 +19,11 @@ services:
     env_file:
       - .env
     restart: unless-stopped
+    networks:
+      - default
+      - redis_net
+
+networks:
+  redis_net:
+    external: true
+    name: docker_default
