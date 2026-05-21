@@ -23,7 +23,25 @@ services:
       - default
       - redis_net
 
+  web:
+    image: node:22-bookworm-slim
+    working_dir: /app/web
+    command: sh -c "npm ci && npm run dev -- --host 0.0.0.0 --port 5177"
+    environment:
+      VITE_API_PROXY_TARGET: http://api:3737
+    ports:
+      - "5177:5177"
+    volumes:
+      - .:/app
+      - web_node_modules:/app/web/node_modules
+    depends_on:
+      - api
+    restart: unless-stopped
+
 networks:
   redis_net:
     external: true
     name: docker_default
+
+volumes:
+  web_node_modules:
