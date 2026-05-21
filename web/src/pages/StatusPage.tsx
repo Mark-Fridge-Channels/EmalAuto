@@ -108,7 +108,7 @@ export default function StatusPage() {
               <Typography variant="subtitle2" gutterBottom>
                 进程
               </Typography>
-              <Stack direction="row" flexWrap="wrap" gap={1} sx={{ mb: 1 }}>
+              <Stack direction="row" spacing={1} sx={{ mb: 1, flexWrap: "wrap" }}>
                 <StatusChip ok={data.api.running} label="API 服务" />
                 <StatusChip ok={data.worker.running} label="Worker 进程" />
                 <StatusChip ok={data.api.notionPoller} label="Notion Poller" />
@@ -126,20 +126,20 @@ export default function StatusPage() {
               <Typography variant="subtitle2" gutterBottom>
                 依赖
               </Typography>
-              <Stack direction="row" flexWrap="wrap" gap={1} sx={{ mb: 1 }}>
+              <Stack direction="row" spacing={1} sx={{ mb: 1, flexWrap: "wrap" }}>
                 <StatusChip ok={data.dependencies.postgres} label="Postgres" />
                 <StatusChip ok={data.dependencies.redis} label="Redis" />
                 <StatusChip ok={data.dependencies.notion} label="Notion DB" />
                 <StatusChip ok={data.dependencies.graph} label="Graph（全部 App）" />
               </Stack>
               {Object.keys(data.graphApps).length > 0 && (
-                <Stack direction="row" flexWrap="wrap" gap={0.75}>
+                <Stack direction="row" spacing={0.75} sx={{ flexWrap: "wrap" }}>
                   {Object.entries(data.graphApps).map(([domain, ok]) => (
                     <Chip key={domain} size="small" label={domain} color={ok ? "success" : "error"} variant="outlined" />
                   ))}
                 </Stack>
               )}
-              <Typography variant="caption" display="block" color="text.secondary" sx={{ mt: 1 }}>
+              <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: "block" }}>
                 MSAL token 缓存条目：{data.tokensCached}
               </Typography>
             </Paper>
