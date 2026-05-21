@@ -198,3 +198,8 @@ export function stopNotionPoller(): void {
     logger.info("notion poller stopped");
   }
 }
+
+/** Whether the Notion send-task poller interval is active (runs in the API process). */
+export function isNotionPollerRunning(): boolean {
+  return timer !== null;
+}

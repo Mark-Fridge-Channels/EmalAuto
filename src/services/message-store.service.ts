@@ -66,3 +66,11 @@ export async function markOutboundReplyReceived(id: number): Promise<void> {
     .set({ threadStatus: "reply_received", updatedAt: new Date() })
     .where(eq(outboundMessages.id, id));
 }
+
+/** Persist send/reply body (Notion Outreach Body or Payload) on the outbound row. */
+export async function updateOutboundBody(id: number, body: string): Promise<void> {
+  await db
+    .update(outboundMessages)
+    .set({ body: String(body ?? ""), updatedAt: new Date() })
+    .where(eq(outboundMessages.id, id));
+}

@@ -17,11 +17,11 @@ import { loadConfig } from "../config/index.js";
 import { logger } from "../utils/logger.js";
 import { getRedis } from "../queues/connection.js";
 import { QUEUE_NAMES, type SendJobData } from "../queues/queues.js";
-import { buildSendJobFromNotion } from "../services/job-builder.service.js";
+import { buildSendJobFromNotion, resolveOutboundBodyHtml } from "../services/job-builder.service.js";
 import { resolveDtcOutboundSend, updateDtcEntityColdReachAfterSend } from "../notion/dtc-send.js";
 import { findRecentSentMessage, sendMail, sendMailReplyInThread, type SentItemsLookupHit } from "../graph/mail.service.js";
 import { findMailboxByEmail } from "../db/repositories/mailbox.repo.js";
-import { recordOutbound } from "../services/message-store.service.js";
+import { recordOutbound, updateOutboundBody } from "../services/message-store.service.js";
 import { markSending, writeSendFailure, writeSendSuccess } from "../notion/writer.js";
 import { getPage } from "../notion/client.js";
 import {
@@ -106,6 +106,8 @@ async function process(job: Job<SendJobData>): Promise<void> {
         bodyHtml: draft.bodyHtml,
         isHtml: draft.isHtml,
         subject: draft.subject?.trim() || undefined,
+        cc: draft.cc?.length ? draft.cc : undefined,
+        bcc: draft.bcc?.length ? draft.bcc : undefined,
       });
       logger.info(
         { notionPageId, replyToMessageId: replyAnchor.slice(0, 24), conversationId: hit.conversationId },
@@ -133,6 +135,20 @@ async function process(job: Job<SendJobData>): Promise<void> {
     }
 
     const sentAt = new Date(hit.sentAt);
+    let outboundBody = draft.bodyHtml?.trim() ?? "";
+    if (!outboundBody) {
+      try {
+        const page = await getPage(notionPageId);
+        outboundBody = resolveOutboundBodyHtml(
+          page.properties as Record<string, unknown>,
+          built.actionType,
+          loadConfig(),
+        );
+      } catch (err) {
+        logger.warn({ err, notionPageId }, "send: could not re-read body from Notion for PG persist");
+      }
+    }
+
     const inserted = await recordOutbound({
       mailboxId: mailbox.id,
       notionPageId,
@@ -140,12 +156,21 @@ async function process(job: Job<SendJobData>): Promise<void> {
       internetMessageId: hit.internetMessageId,
       conversationId: hit.conversationId,
       subject: hit.subject,
-      body: draft.bodyHtml,
+      body: outboundBody,
       sentAt,
       recipientsJson: { to: draft.to, cc: draft.cc ?? [], bcc: draft.bcc ?? [] } as any,
       metaJson: { actionType: built.actionType } as any,
       threadStatus: "sent",
     });
+
+    if (!inserted.body?.trim() && outboundBody) {
+      await updateOutboundBody(inserted.id, outboundBody);
+    } else if (!outboundBody) {
+      logger.warn(
+        { notionPageId, outboundId: inserted.id, actionType: built.actionType },
+        "send: outbound_messages.body is empty after send",
+      );
+    }
 
     try {
       const cfg = loadConfig();

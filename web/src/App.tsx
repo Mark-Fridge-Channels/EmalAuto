@@ -11,6 +11,7 @@ import InboxPage from "./pages/InboxPage";
 import OutboundPage from "./pages/OutboundPage";
 import DomainsPage from "./pages/DomainsPage";
 import MailboxesPage from "./pages/MailboxesPage";
+import StatusPage from "./pages/StatusPage";
 
 const theme = createTheme();
 
@@ -54,6 +55,7 @@ export default function App() {
             }
           >
             <Route path="/" element={<DashboardPage />} />
+            <Route path="/status" element={<StatusPage />} />
             <Route path="/inbox" element={<InboxPage />} />
             <Route path="/outbound" element={<OutboundPage />} />
             <Route path="/domains" element={<DomainsPage />} />

@@ -55,16 +55,102 @@ function escapeHtml(s: string): string {
     .replace(/"/g, "&quot;");
 }
 
-function stripHtmlToQuoteText(html: string, maxLen: number): string {
+const QUOTE_BLOCK_TAGS = new Set([
+  "P",
+  "DIV",
+  "LI",
+  "TR",
+  "TD",
+  "TH",
+  "TABLE",
+  "TBODY",
+  "THEAD",
+  "BLOCKQUOTE",
+  "H1",
+  "H2",
+  "H3",
+  "H4",
+  "H5",
+  "H6",
+  "PRE",
+  "HR",
+  "SECTION",
+  "ARTICLE",
+  "HEADER",
+  "FOOTER",
+  "DL",
+  "DT",
+  "DD",
+]);
+
+function normalizeQuotePlainText(text: string): string {
+  return text
+    .replace(/\r\n/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n[ \t]+/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
+
+/** HTML → plain text while keeping block/line breaks (Gmail thread quotes). */
+function htmlToQuoteText(html: string, maxLen: number): string {
   if (typeof document === "undefined") {
-    const t = html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+    const t = normalizeQuotePlainText(
+      html
+        .replace(/<\s*br\s*\/?>/gi, "\n")
+        .replace(/<\/\s*(p|div|blockquote|li|tr|h[1-6])\s*>/gi, "\n")
+        .replace(/<[^>]+>/g, ""),
+    );
     return t.length <= maxLen ? t : `${t.slice(0, maxLen)}…`;
   }
-  const el = document.createElement("div");
-  el.innerHTML = html;
-  const t = (el.textContent || "").replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
-  if (t.length <= maxLen) return t;
-  return `${t.slice(0, maxLen)}…`;
+  const root = document.createElement("div");
+  root.innerHTML = html;
+  const parts: string[] = [];
+
+  const walk = (node: Node) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      const t = node.textContent ?? "";
+      if (t) parts.push(t);
+      return;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return;
+    const el = node as Element;
+    const tag = el.tagName;
+    if (tag === "STYLE" || tag === "SCRIPT") return;
+    if (tag === "BR") {
+      parts.push("\n");
+      return;
+    }
+    const isBlock = QUOTE_BLOCK_TAGS.has(tag);
+    if (isBlock) parts.push("\n");
+    for (const child of Array.from(el.childNodes)) walk(child);
+    if (isBlock) parts.push("\n");
+  };
+
+  walk(root);
+  const text = normalizeQuotePlainText(parts.join(""));
+  if (text.length > maxLen) return `${text.slice(0, maxLen)}…`;
+  return text;
+}
+
+/** Plain text (with newlines) → safe HTML paragraphs for email clients / TipTap. */
+function quoteTextToHtml(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed) return "<p>（无正文）</p>";
+  return trimmed
+    .split(/\n\n+/)
+    .map((para) => {
+      const lines = para.split("\n");
+      const inner = lines
+        .map((line, i) => {
+          const e = escapeHtml(line);
+          return i < lines.length - 1 ? `${e}<br>` : e;
+        })
+        .join("");
+      return `<p>${inner || "<br>"}</p>`;
+    })
+    .join("");
 }
 
 export function replySubject(raw: string): string {
@@ -85,12 +171,12 @@ function buildInitialReplyHtml(params: {
   const ct = (graphBody?.contentType ?? "").toLowerCase();
   let quoteBody = bodyPreviewFallback.trim();
   if (raw) {
-    quoteBody = ct.includes("html") ? stripHtmlToQuoteText(raw, 12_000) : raw.slice(0, 12_000);
+    quoteBody = ct.includes("html") ? htmlToQuoteText(raw, 12_000) : raw.slice(0, 12_000);
   }
   const safeFrom = escapeHtml(quotedHeaderFrom);
   const safeWhen = escapeHtml(quotedHeaderWhen);
-  const safeQuote = escapeHtml(quoteBody || "（无正文）");
-  return `<p></p><p><br></p><hr style="border:none;border-top:1px solid #dadce0;margin:16px 0" /><blockquote style="margin:0;padding:8px 12px;border-left:3px solid #1a73e8;background:#f8f9fa;color:#202124;font-size:13px;line-height:1.5"><div style="font-weight:600;margin-bottom:8px">${safeFrom} · ${safeWhen}</div><div style="white-space:pre-wrap;font-family:inherit">${safeQuote}</div></blockquote>`;
+  const quoteHtml = quoteTextToHtml(quoteBody);
+  return `<p></p><p><br></p><hr style="border:none;border-top:1px solid #dadce0;margin:16px 0" /><blockquote style="margin:0;padding:8px 12px;border-left:3px solid #1a73e8;background:#f8f9fa;color:#202124;font-size:13px;line-height:1.5"><div style="font-weight:600;margin-bottom:8px">${safeFrom} · ${safeWhen}</div><div style="font-family:inherit">${quoteHtml}</div></blockquote>`;
 }
 
 function formatWhen(iso?: string): string {

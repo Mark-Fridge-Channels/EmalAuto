@@ -100,6 +100,8 @@ const propertyNamesSchema = z.object({
   /** When to start sending; poller only enqueues when empty (= ASAP) or datetime ≤ now. */
   trigger_time: z.string().min(1),
   task_id: z.string().min(1),
+  /** Comma-separated Cc addresses (rich_text on Interaction LOG). */
+  cc: z.string().min(1),
 });
 
 const notionDtcSchema = z.object({
@@ -336,6 +338,7 @@ export function loadConfig(): AppConfig {
         last_reply_time: envRequired("NOTION_COL_LAST_REPLY_TIME"),
         trigger_time: envRequired("NOTION_COL_TRIGGER_TIME"),
         task_id: envRequired("NOTION_COL_TASK_ID"),
+        cc: envStr("NOTION_COL_CC", "cc"),
       },
       status_values: {
         todo: envRequired("NOTION_STATUS_TODO"),

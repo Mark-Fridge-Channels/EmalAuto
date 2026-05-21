@@ -23,6 +23,7 @@ import { findMailboxById } from "../db/repositories/mailbox.repo.js";
 import { GraphApiError } from "../graph/client.js";
 import { getMessageFullForAdmin, downloadAttachmentBytes } from "../graph/mail.service.js";
 import { executeAdminInboxReply } from "../services/admin-reply.service.js";
+import { buildSystemStatus } from "../services/system-status.service.js";
 import { db } from "../db/client.js";
 import { outboundMessages } from "../db/schema/outbound_messages.js";
 import { inboxMessages } from "../db/schema/inbox_messages.js";
@@ -124,6 +125,8 @@ export async function registerAdminConsole(app: FastifyInstance): Promise<void> 
       });
 
       scope.get("/me", async () => ({ ok: true, role: "admin" }));
+
+      scope.get("/system/status", async () => buildSystemStatus());
 
       scope.get("/dashboard", async (req) => {
         const q = z

@@ -19,6 +19,7 @@ const drawerWidth = 220;
 
 const nav = [
   { path: "/", label: "Dashboard" },
+  { path: "/status", label: "系统状态" },
   { path: "/inbox", label: "Inbox" },
   { path: "/outbound", label: "Outbound" },
   { path: "/domains", label: "Domain Config" },

@@ -49,6 +49,49 @@ export function readEmail(prop: any): string {
   return "";
 }
 
+/** Split comma/semicolon/whitespace-separated addresses; normalize + dedupe. */
+export function parseEmailListFromText(raw: string): string[] {
+  const parts = String(raw ?? "")
+    .split(/[,;]+/)
+    .flatMap((chunk) => chunk.split(/\s+/))
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const p of parts) {
+    const e = normalizeEmail(p);
+    if (!/@/.test(e) || seen.has(e)) continue;
+    seen.add(e);
+    out.push(e);
+  }
+  return out;
+}
+
+/** Read CC/BCC-style lists from rich_text, title, or email properties. */
+export function readCommaSeparatedEmails(prop: unknown): string[] {
+  if (!prop || typeof prop !== "object") return [];
+  const o = prop as Record<string, unknown>;
+  if (o.type === "email" && o.email) {
+    const e = normalizeEmail(String(o.email));
+    return /@/.test(e) ? [e] : [];
+  }
+  return parseEmailListFromText(readRichText(prop as never));
+}
+
+export function mergeEmailLists(...lists: string[][]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const list of lists) {
+    for (const raw of list) {
+      const e = normalizeEmail(raw);
+      if (!/@/.test(e) || seen.has(e)) continue;
+      seen.add(e);
+      out.push(e);
+    }
+  }
+  return out;
+}
+
 export function readDateStart(prop: any): string {
   if (prop?.type !== "date") return "";
   return String(prop.date?.start ?? "").trim();
@@ -134,6 +177,7 @@ export function buildPropertyResolver(cfg: AppConfig) {
     last_reply_time: [p.last_reply_time, "Last Reply Time", "last_reply_time"],
     trigger_time: [p.trigger_time, "Trigger Time", "trigger_time", "triggerTime"],
     task_id: [p.task_id, "Task ID", "task_id", "taskId"],
+    cc: [p.cc, "cc", "CC", "Cc"],
   };
 
   const dedupe = <T,>(arr: T[]): T[] => Array.from(new Set(arr));

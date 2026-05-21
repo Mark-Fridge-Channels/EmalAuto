@@ -31,6 +31,7 @@ const REQUIRED_FIELDS: FieldSpec[] = [
   { semanticKey: "reply_email", allowedTypes: ["email", "rich_text"] },
   { semanticKey: "last_reply_time", allowedTypes: ["date"] },
   { semanticKey: "trigger_time", allowedTypes: ["date"] },
+  { semanticKey: "cc", allowedTypes: ["rich_text", "email", "title"] },
 ];
 
 const DTC_IL_FIELDS: Array<{
