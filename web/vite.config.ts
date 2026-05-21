@@ -8,13 +8,13 @@ export default defineConfig({
   plugins: [react()],
   server: {
     host: "0.0.0.0",
-    allowedHosts: ["paula.fridgechannels.com"],
+    allowedHosts: ["email.fridgechannels.com"],
     proxy: {
       "/api": { target: apiProxyTarget, changeOrigin: true },
     },
   },
   preview: {
     host: "0.0.0.0",
-    allowedHosts: ["paula.fridgechannels.com"],
+    allowedHosts: ["email.fridgechannels.com"],
   },
 });
