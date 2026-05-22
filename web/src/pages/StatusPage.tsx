@@ -212,7 +212,7 @@ export default function StatusPage() {
                       <TableCell align="right" sx={{ fontVariantNumeric: "tabular-nums" }}>
                         {q.jobs.failed}
                         {q.probeTimedOut ? (
-                          <Typography variant="caption" color="warning.main" display="block">
+                          <Typography variant="caption" color="warning.main" sx={{ display: "block" }}>
                             探测超时
                           </Typography>
                         ) : null}
