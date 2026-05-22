@@ -19,6 +19,7 @@ import { api } from "../api";
 
 type SystemStatus = {
   checkedAt: string;
+  warnings?: string[];
   api: { running: boolean; uptimeSeconds: number; nodeEnv: string; notionPoller: boolean };
   worker: { running: boolean; detail: string };
   dependencies: { ok: boolean; postgres: boolean; redis: boolean; notion: boolean; graph: boolean };
@@ -29,6 +30,7 @@ type SystemStatus = {
     expected: boolean;
     workers: number;
     jobs: { waiting: number; active: number; delayed: number; failed: number };
+    probeTimedOut?: boolean;
   }[];
   config: { v2Enabled: boolean; inboxPollingScheduler: boolean; webhookIngestWorker: boolean };
   tokensCached: number;
@@ -103,6 +105,16 @@ export default function StatusPage() {
             <Typography variant="caption" color="text.secondary">
               上次检查：{new Date(data.checkedAt).toLocaleString()}
             </Typography>
+
+            {data.warnings && data.warnings.length > 0 ? (
+              <Alert severity="warning">
+                {data.warnings.map((w) => (
+                  <Typography key={w} variant="body2" component="div">
+                    {w}
+                  </Typography>
+                ))}
+              </Alert>
+            ) : null}
 
             <Paper variant="outlined" sx={{ p: { xs: 1.5, sm: 2 } }}>
               <Typography variant="subtitle2" gutterBottom>
@@ -199,6 +211,11 @@ export default function StatusPage() {
                       </TableCell>
                       <TableCell align="right" sx={{ fontVariantNumeric: "tabular-nums" }}>
                         {q.jobs.failed}
+                        {q.probeTimedOut ? (
+                          <Typography variant="caption" color="warning.main" display="block">
+                            探测超时
+                          </Typography>
+                        ) : null}
                       </TableCell>
                     </TableRow>
                   ))}

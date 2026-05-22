@@ -29,6 +29,7 @@ import {
   extractCrmFromInteractionLogPage,
 } from "../notion/crm-snapshot.js";
 import { updateOutboundCrmFields } from "../db/repositories/outbound.repo.js";
+import { ensureSenderSignature } from "../services/mail-signature.service.js";
 import { sleep } from "../utils/sleep.js";
 
 let worker: Worker<SendJobData> | null = null;
@@ -88,6 +89,7 @@ async function process(job: Job<SendJobData>): Promise<void> {
     await softFail("missing body");
     return;
   }
+  draft.bodyHtml = ensureSenderSignature(draft.bodyHtml, draft.fromMailbox, draft.isHtml !== false);
 
   const mailbox = await findMailboxByEmail(draft.fromMailbox);
   if (!mailbox || !mailbox.enabled || !mailbox.canSend) {

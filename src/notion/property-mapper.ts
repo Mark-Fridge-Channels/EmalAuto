@@ -128,6 +128,15 @@ function sanitizeHttpHref(url: string): string {
   return /^https?:\/\//i.test(u) ? u : "";
 }
 
+export function isLikelyHtmlContent(raw: string): boolean {
+  const s = String(raw ?? "").trim();
+  if (!s) return false;
+  if (/<!doctype\s+html\b/i.test(s)) return true;
+  return /<\/?(?:html|head|body|title|meta|link|style|div|p|br|span|a|table|thead|tbody|tfoot|tr|td|th|ul|ol|li|blockquote|pre|code|strong|b|em|i|u|s|hr|img|h[1-6])(?:\s|>|\/>)/i.test(
+    s,
+  );
+}
+
 /**
  * Notion stores hyperlinks in rich_text runs as text.link.url, not in plain_text.
  * concatPlain alone loses links; this preserves links + basic formatting as HTML.
@@ -135,6 +144,9 @@ function sanitizeHttpHref(url: string): string {
  */
 export function richTextPropertyToHtml(prop: any): string {
   if (prop?.type !== "rich_text" || !Array.isArray(prop.rich_text)) return "";
+  const rawPlain = concatPlain(prop.rich_text);
+  if (isLikelyHtmlContent(rawPlain)) return rawPlain;
+
   let out = "";
   for (const rt of prop.rich_text) {
     const content = rt?.plain_text ?? "";

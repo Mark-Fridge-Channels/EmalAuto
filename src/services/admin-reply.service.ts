@@ -11,6 +11,7 @@ import { sendMailReplyInThread } from "../graph/mail.service.js";
 import { recordOutbound } from "../services/message-store.service.js";
 import { createWebReplyNotionPage, writeSendSuccess } from "../notion/writer.js";
 import { logger } from "../utils/logger.js";
+import { ensureSenderSignature } from "./mail-signature.service.js";
 
 export async function executeAdminInboxReply(params: {
   inboxRowId: number;
@@ -35,12 +36,13 @@ export async function executeAdminInboxReply(params: {
   }
 
   let newNotionPageId: string | null = null;
+  const signedBodyHtml = ensureSenderSignature(params.bodyHtml, mailbox.email, true);
   if (parentNotionPageId) {
     newNotionPageId = await createWebReplyNotionPage({
       receivingMailbox: mailbox.email,
       counterpartyEmail: row.fromEmail,
       subject: params.subject?.trim() || row.subject || "(no subject)",
-      bodyHtml: params.bodyHtml,
+      bodyHtml: signedBodyHtml,
       replyAnchorGraphMessageId: row.graphMessageId,
       conversationId: row.conversationId,
       parentOutboundNotionPageId: parentNotionPageId,
@@ -54,7 +56,7 @@ export async function executeAdminInboxReply(params: {
     const hit = await sendMailReplyInThread({
       fromMailbox: mailbox.email,
       replyToMessageId: row.graphMessageId,
-      bodyHtml: params.bodyHtml,
+      bodyHtml: signedBodyHtml,
       isHtml: true,
       subject: params.subject?.trim() || undefined,
       cc: cc.length ? cc : undefined,
@@ -86,7 +88,7 @@ export async function executeAdminInboxReply(params: {
       internetMessageId: hit.internetMessageId,
       conversationId: hit.conversationId,
       subject: hit.subject,
-      body: params.bodyHtml,
+      body: signedBodyHtml,
       sentAt,
       recipientsJson: recipientsJson as NewOutboundMessage["recipientsJson"],
       metaJson: metaJson as NewOutboundMessage["metaJson"],

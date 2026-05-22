@@ -138,6 +138,14 @@ export function clearTokenCache(): void {
   clients.clear();
 }
 
+/** True when an in-process token exists and is still valid beyond the warm skew. */
+export function hasValidCachedToken(appKey: string): boolean {
+  const cfg = loadConfig();
+  const skew = cfg.polling.token_warm_skew_ms;
+  const cached = cache.get(appKey);
+  return Boolean(cached && cached.expiresOn.getTime() - Date.now() > skew);
+}
+
 /** Inspect the cache snapshot (for /health). */
 export function peekCachedTokens(): Array<{ app: string; expiresOn: string }> {
   return Array.from(cache.entries()).map(([app, t]) => ({
