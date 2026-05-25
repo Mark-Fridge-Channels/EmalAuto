@@ -10,7 +10,7 @@ import { loadConfig } from "../config/index.js";
 import { getEffectiveGraphAppsSync } from "../config/graph-apps.runtime.js";
 import { pingDb } from "../db/client.js";
 import { isNotionPollerRunning } from "../notion/poller.js";
-import { retrieveDatabase } from "../notion/client.js";
+import { NotionApiError, retrieveDatabase } from "../notion/client.js";
 import {
   inboxPollQueue,
   matchQueue,
@@ -124,6 +124,23 @@ async function checkGraphApp(appKey: string, warnings: string[]): Promise<readon
   }
 }
 
+async function checkNotionDatabase(databaseId: string, warnings: string[]): Promise<boolean> {
+  try {
+    await withTimeout(retrieveDatabase(databaseId), MS.notion);
+    return true;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("timeout")) {
+      warnings.push(`Notion 探测超时（${MS.notion / 1000}s）：服务器访问 api.notion.com 较慢或被网络限制`);
+    } else if (err instanceof NotionApiError) {
+      warnings.push(`Notion 探测失败：HTTP ${err.status} ${err.message}`);
+    } else {
+      warnings.push(`Notion 探测失败：${msg}`);
+    }
+    return false;
+  }
+}
+
 export async function buildSystemStatus(): Promise<SystemStatusPayload> {
   const cfg = loadConfig();
   const warnings: string[] = [];
@@ -135,16 +152,7 @@ export async function buildSystemStatus(): Promise<SystemStatusPayload> {
   const [dbOk, redisOk, notionOk, graphAppResults, queueRows] = await Promise.all([
     withTimeoutOr(pingDb(), MS.db, false),
     withTimeoutOr(pingRedis(), MS.redis, false),
-    withTimeoutOr(
-      retrieveDatabase(cfg.notion.database_id)
-        .then(() => true)
-        .catch(() => false),
-      MS.notion,
-      false,
-    ).then((ok) => {
-      if (!ok) warnings.push(`Notion 探测超时或失败（${MS.notion / 1000}s）`);
-      return ok;
-    }),
+    checkNotionDatabase(cfg.notion.database_id, warnings),
     Promise.all(appKeys.map((k) => checkGraphApp(k, warnings))),
     Promise.all([
       queueRow(sendQueue, "send", "发信 (send)", true, warnings),
