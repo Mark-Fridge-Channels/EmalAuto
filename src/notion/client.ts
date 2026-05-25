@@ -59,52 +59,69 @@ interface NotionFetchOptions {
   method: "GET" | "POST" | "PATCH" | "DELETE";
   path: string;
   body?: unknown;
-  attempt?: number;
+}
+
+interface NotionFetchResult {
+  ok: boolean;
+  status: number;
+  retryAfter: string | null;
+  data: any;
 }
 
 async function notionFetch<T>(opts: NotionFetchOptions): Promise<T> {
   const cfg = loadConfig();
-  const { method, path, body, attempt = 0 } = opts;
+  const { method, path, body } = opts;
   const url = `${NOTION_BASE}${path}`;
+  const maxAttempts = 6;
 
-  return withRateLimit(async () => {
-    const res = await fetch(url, {
-      method,
-      headers: {
-        Authorization: `Bearer ${cfg.notion.token}`,
-        "Notion-Version": cfg.notion.notion_version,
-        "Content-Type": "application/json",
-      },
-      body: body ? JSON.stringify(body) : undefined,
-    });
-    const text = await res.text();
-    let data: any;
-    try {
-      data = text ? JSON.parse(text) : {};
-    } catch {
-      data = { raw: text };
-    }
-    if (!res.ok) {
-      const maxAttempts = 6;
-      const retryable = res.status === 429 || res.status === 502 || res.status === 503 || res.status === 504;
-      if (retryable && attempt < maxAttempts) {
-        const retryAfter = parseInt(res.headers.get("retry-after") ?? "", 10);
-        const cap = res.status === 504 ? 45_000 : 12_000;
-        const base = res.status === 504 ? 3000 : 500;
-        const backoff =
-          Number.isFinite(retryAfter) && retryAfter > 0
-            ? retryAfter * 1000
-            : Math.min(cap, base * 2 ** attempt);
-        logger.warn({ path, status: res.status, attempt, backoff }, "notion transient error, backing off");
-        await sleep(backoff);
-        return notionFetch<T>({ ...opts, attempt: attempt + 1 });
+  for (let attempt = 0; attempt <= maxAttempts; attempt += 1) {
+    const result = await withRateLimit<NotionFetchResult>(async () => {
+      const res = await fetch(url, {
+        method,
+        headers: {
+          Authorization: `Bearer ${cfg.notion.token}`,
+          "Notion-Version": cfg.notion.notion_version,
+          "Content-Type": "application/json",
+        },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      const text = await res.text();
+      let data: any;
+      try {
+        data = text ? JSON.parse(text) : {};
+      } catch {
+        data = { raw: text };
       }
-      const code = data?.code != null ? String(data.code) : "";
-      const msg = data?.message ?? data?.error ?? `Notion API error: HTTP ${res.status}`;
-      throw new NotionApiError(code ? `[${code}] ${msg}` : msg, res.status, code, data);
+      return {
+        ok: res.ok,
+        status: res.status,
+        retryAfter: res.headers.get("retry-after"),
+        data,
+      };
+    });
+
+    if (result.ok) return result.data as T;
+
+    const retryable = result.status === 429 || result.status === 502 || result.status === 503 || result.status === 504;
+    if (retryable && attempt < maxAttempts) {
+      const retryAfter = parseInt(result.retryAfter ?? "", 10);
+      const cap = result.status === 504 ? 45_000 : 12_000;
+      const base = result.status === 504 ? 3000 : 500;
+      const backoff =
+        Number.isFinite(retryAfter) && retryAfter > 0
+          ? retryAfter * 1000
+          : Math.min(cap, base * 2 ** attempt);
+      logger.warn({ path, status: result.status, attempt, backoff }, "notion transient error, backing off");
+      await sleep(backoff);
+      continue;
     }
-    return data as T;
-  });
+
+    const code = result.data?.code != null ? String(result.data.code) : "";
+    const msg = result.data?.message ?? result.data?.error ?? `Notion API error: HTTP ${result.status}`;
+    throw new NotionApiError(code ? `[${code}] ${msg}` : msg, result.status, code, result.data);
+  }
+
+  throw new Error("unreachable");
 }
 
 /* -------------------------- Public surface -------------------------- */
