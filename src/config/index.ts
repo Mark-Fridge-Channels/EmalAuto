@@ -119,6 +119,8 @@ const notionDtcSchema = z.object({
     email_verified_status: z.string().min(1),
   }),
   key_person_email_verified_value: z.string().min(1),
+  /** DTC Key Person Email Verified Status written when a bounce is matched. */
+  key_person_email_failed_value: z.string().min(1),
   /** DTC Entity ColdReach Status written when a **human** inbound reply is matched. */
   human_reply_cold_reach_status: z.string().min(1),
   /** Columns on linked DTC Key Person / Entity pages → PG CRM fields. */
@@ -375,6 +377,10 @@ export function loadConfig(): AppConfig {
           ),
         },
         key_person_email_verified_value: envStr("NOTION_DTC_KP_EMAIL_VERIFIED_VALUE", "Verified"),
+        key_person_email_failed_value: envStr(
+          "NOTION_DTC_KP_EMAIL_FAILED_VALUE",
+          "Send Email Failed",
+        ),
         human_reply_cold_reach_status: envStr("NOTION_DTC_HUMAN_REPLY_COLD_REACH", "Humen"),
         sync_columns: {
           kp_id_prop: envStr("NOTION_IL_SYNC_KP_ID_PROP", "ID"),

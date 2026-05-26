@@ -15,6 +15,8 @@
  */
 
 import { logger } from "../utils/logger.js";
+import { detectBounce } from "./bounce-detector.service.js";
+import { findBounceOutboundMatch } from "./bounce-matcher.service.js";
 import { findOutboundByConversation } from "./message-store.service.js";
 import {
   isLegacyOutboundConversationId,
@@ -30,7 +32,7 @@ export interface MatchResult {
   notionPageId?: string | null;
   reason?: string;
   /** How the outbound row was resolved (for logs / metrics). */
-  method?: "conversation" | "legacy_heuristic";
+  method?: "conversation" | "legacy_heuristic" | "bounce_recipient";
 }
 
 export interface InboundMatchInput {
@@ -40,6 +42,7 @@ export interface InboundMatchInput {
   fromEmail: string;
   recipientsJson: unknown;
   receivedAt: Date;
+  bodyPreview?: string;
 }
 
 /** Lookup only — does not mutate `thread_status`. */
@@ -103,7 +106,7 @@ export async function findLegacyOutboundMatch(
 }
 
 /**
- * Resolve outbound for an inbound row: Graph conversationId first, then legacy heuristic.
+ * Resolve outbound for an inbound row: conversationId → bounce recipient → legacy heuristic.
  * Does not update `thread_status` — the match worker applies status after bounce detection.
  */
 export async function resolveInboundOutboundMatch(
@@ -112,6 +115,16 @@ export async function resolveInboundOutboundMatch(
 ): Promise<MatchResult> {
   const byConv = await findOutboundMatchByConversation(inbox.conversationId);
   if (byConv.matched) return byConv;
+
+  const bounce = detectBounce({ fromEmail: inbox.fromEmail, subject: inbox.subject });
+  if (bounce.isBounce) {
+    const byRecipient = await findBounceOutboundMatch(
+      { ...inbox, bodyPreview: inbox.bodyPreview ?? "" },
+      mailboxEmail,
+    );
+    if (byRecipient.matched) return byRecipient;
+  }
+
   return findLegacyOutboundMatch(inbox, mailboxEmail);
 }
 

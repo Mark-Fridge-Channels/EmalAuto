@@ -3,7 +3,7 @@
  *
  *   inbox row
  *     ↓ bounce detector (heuristic)
- *     ↓ resolveInboundOutboundMatch (conversationId, then legacy heuristic)
+ *     ↓ resolveInboundOutboundMatch (conversationId → bounce recipient → legacy)
  *     ├── matched + bounce → mark outbound bounce + write Notion bounce
  *     ├── matched + auto-reply → link inbox only (no reply_received / no IL child)
  *     ├── matched + human reply → Notion Inbound Reply child + parent Done;
@@ -35,6 +35,7 @@ import { upsertConversation } from "../db/repositories/conversation.repo.js";
 import {
   markDtcEntityColdReachOnHumanReply,
   rollbackDtcEntityColdReachOnBounce,
+  markDtcKeyPersonEmailFailedOnBounce,
 } from "../notion/dtc-send.js";
 import { createInboundReplyRow, markOriginalReplyDone, writeBounce } from "../notion/writer.js";
 import { getPage } from "../notion/client.js";
@@ -162,6 +163,7 @@ async function processMatch(job: Job<MatchJobData>): Promise<void> {
       fromEmail: row.fromEmail,
       recipientsJson: row.recipientsJson,
       receivedAt: row.receivedAt,
+      bodyPreview: row.bodyPreview,
     },
     mailboxEmail,
   );
@@ -184,19 +186,21 @@ async function processMatch(job: Job<MatchJobData>): Promise<void> {
   }
 
   if (bounce.isBounce && matched.outboundId) {
-    await syncInboxCrmFromMatch(row.id, matched.outboundId, matched.notionPageId);
+    const bounceReason = `${bounce.reason}; subject="${row.subject}"; from=${row.fromEmail}`;
+    await markOutboundBounce(matched.outboundId, bounceReason);
+    const { crm } = await syncInboxCrmFromMatch(row.id, matched.outboundId, matched.notionPageId);
     if (matched.notionPageId) {
       await markInboxMatched(row.id, matched.outboundId, "bounce");
       await upsertConversation(row.conversationId, matched.notionPageId, row.id, row.receivedAt);
-      const reason = `${bounce.reason}; subject="${row.subject}"; from=${row.fromEmail}`;
       await writeBounce(matched.notionPageId, {
-        reason,
+        reason: bounceReason,
         inboundMessageId: row.graphMessageId,
         inboundConversationId: row.conversationId,
         receivedAt: row.receivedAt,
       });
+      const cfg = loadConfig();
       try {
-        const rollback = await rollbackDtcEntityColdReachOnBounce(matched.notionPageId, loadConfig());
+        const rollback = await rollbackDtcEntityColdReachOnBounce(matched.notionPageId, cfg);
         if (rollback.rolledBack) {
           logger.info(
             {
@@ -213,8 +217,51 @@ async function processMatch(job: Job<MatchJobData>): Promise<void> {
           "match: DTC Entity ColdReach rollback failed after bounce",
         );
       }
+      try {
+        const kpMark = await markDtcKeyPersonEmailFailedOnBounce(cfg, {
+          ilNotionPageId: matched.notionPageId,
+          keyPersonNotionUrl: crm.keyPersonNotionUrl,
+        });
+        if (kpMark.updated) {
+          logger.info(
+            {
+              notionPageId: matched.notionPageId,
+              keyPersonPageId: kpMark.keyPersonPageId,
+              status: kpMark.status,
+              source: kpMark.source,
+            },
+            "match: DTC Key Person Email Verified Status set after bounce",
+          );
+        } else {
+          logger.warn(
+            { notionPageId: matched.notionPageId, inboxRowId: row.id, source: kpMark.source },
+            "match: DTC Key Person Email Verified Status not updated (no Key Person page resolved)",
+          );
+        }
+      } catch (err) {
+        logger.error(
+          { err, notionPageId: matched.notionPageId, inboxRowId: row.id },
+          "match: DTC Key Person Email Verified Status update failed after bounce",
+        );
+      }
     } else {
       await markInboxMatched(row.id, matched.outboundId, "bounce");
+      try {
+        const kpMark = await markDtcKeyPersonEmailFailedOnBounce(loadConfig(), {
+          keyPersonNotionUrl: crm.keyPersonNotionUrl,
+        });
+        if (kpMark.updated) {
+          logger.info(
+            { keyPersonPageId: kpMark.keyPersonPageId, status: kpMark.status, inboxRowId: row.id },
+            "match: DTC Key Person Email Verified Status set after bounce (no IL page)",
+          );
+        }
+      } catch (err) {
+        logger.error(
+          { err, inboxRowId: row.id, outboundId: matched.outboundId },
+          "match: DTC Key Person Email Verified Status update failed after bounce (no IL page)",
+        );
+      }
     }
     logger.info(
       { inboxRowId: row.id, outboundId: matched.outboundId, method: matched.method },
