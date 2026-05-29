@@ -386,7 +386,8 @@ export default function ReplyComposerDialog({
   }, [open, row?.id, graphOk, graphMsg?.subject, row?.subject]);
 
   const attachmentUrl = useCallback((inboxId: number, attId: string) => {
-    return `/api/inbox/${inboxId}/attachments/${encodeURIComponent(attId)}`;
+    const q = new URLSearchParams({ attId });
+    return `/api/inbox/${inboxId}/attachments?${q.toString()}`;
   }, []);
 
   const handleSend = useCallback(async () => {

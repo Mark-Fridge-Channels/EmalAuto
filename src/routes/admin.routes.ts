@@ -421,9 +421,12 @@ export async function registerAdminConsole(app: FastifyInstance): Promise<void> 
         return full;
       });
 
-      scope.get("/inbox/:id/attachments/:attId", async (req, reply) => {
+      scope.get("/inbox/:id/attachments", async (req, reply) => {
         const id = Number((req.params as { id: string }).id);
-        const attId = (req.params as { attId: string }).attId;
+        if (!Number.isFinite(id)) return reply.code(400).send({ error: "bad id" });
+        const attParsed = z.string().min(1).max(2048).safeParse((req.query as { attId?: string }).attId);
+        if (!attParsed.success) return reply.code(400).send({ error: "attId required" });
+        const attId = attParsed.data;
         const row = await findInboxById(id);
         if (!row) return reply.code(404).send({ error: "not found" });
         const box = await findMailboxById(row.mailboxId);

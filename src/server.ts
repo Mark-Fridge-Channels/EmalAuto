@@ -48,6 +48,8 @@ async function main(): Promise<void> {
   // injecting our pino instance — the type plumbing for `loggerInstance`
   // is finicky and gives us no extra value here.
   const app = Fastify({
+    // Graph message/attachment ids exceed find-my-way's default maxParamLength (100).
+    routerOptions: { maxParamLength: 2048 },
     logger: {
       level: cfg.logging.level,
       ...(cfg.logging.pretty
