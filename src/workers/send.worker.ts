@@ -29,7 +29,12 @@ import {
   extractCrmFromInteractionLogPage,
 } from "../notion/crm-snapshot.js";
 import { updateOutboundCrmFields } from "../db/repositories/outbound.repo.js";
-import { ensureSenderSignature } from "../services/mail-signature.service.js";
+import { ensureOutboundMailBody } from "../services/mail-signature.service.js";
+import {
+  buildListUnsubscribeHeaders,
+  canIssueListUnsubscribeHeaders,
+  createUnsubscribeToken,
+} from "../services/list-unsubscribe.service.js";
 import { sleep } from "../utils/sleep.js";
 
 let worker: Worker<SendJobData> | null = null;
@@ -89,7 +94,37 @@ async function process(job: Job<SendJobData>): Promise<void> {
     await softFail("missing body");
     return;
   }
-  draft.bodyHtml = ensureSenderSignature(draft.bodyHtml, draft.fromMailbox, draft.isHtml !== false);
+  const cfg = loadConfig();
+  draft.bodyHtml = ensureOutboundMailBody(
+    draft.bodyHtml,
+    draft.fromMailbox,
+    draft.isHtml !== false,
+    cfg.mail.opt_out_footer_text,
+  );
+
+  if (built.actionType === "send" && !isReplyInThread && draft.to[0]) {
+    const publicBase = cfg.v2.public_base_url.trim();
+    const secret = cfg.mail.list_unsubscribe_token_secret.trim();
+    if (!canIssueListUnsubscribeHeaders(publicBase)) {
+      logger.warn(
+        { notionPageId, publicBase: publicBase || "(empty)" },
+        "send: skipping List-Unsubscribe headers — V2_PUBLIC_BASE_URL must be https://",
+      );
+    } else if (secret.length < 8) {
+      logger.warn({ notionPageId }, "send: skipping List-Unsubscribe headers — token secret too short");
+    } else {
+      const token = createUnsubscribeToken(
+        { recipientEmail: draft.to[0], notionPageId },
+        secret,
+        cfg.mail.list_unsubscribe_token_ttl_days * 24 * 60 * 60,
+      );
+      draft.internetMessageHeaders = buildListUnsubscribeHeaders({
+        publicBaseUrl: publicBase,
+        unsubscribePath: cfg.mail.list_unsubscribe_path,
+        token,
+      });
+    }
+  }
 
   const mailbox = await findMailboxByEmail(draft.fromMailbox);
   if (!mailbox || !mailbox.enabled || !mailbox.canSend) {

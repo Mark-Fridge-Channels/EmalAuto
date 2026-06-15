@@ -2,6 +2,7 @@
  * Admin console: send an in-thread reply anchored on an `inbox_messages` row.
  */
 
+import { loadConfig } from "../config/index.js";
 import { findInboxById } from "../db/repositories/inbox.repo.js";
 import { findMailboxById } from "../db/repositories/mailbox.repo.js";
 import { db } from "../db/client.js";
@@ -11,7 +12,7 @@ import { sendMailReplyInThread } from "../graph/mail.service.js";
 import { recordOutbound } from "../services/message-store.service.js";
 import { createWebReplyNotionPage, writeSendSuccess } from "../notion/writer.js";
 import { logger } from "../utils/logger.js";
-import { ensureSenderSignature } from "./mail-signature.service.js";
+import { ensureOutboundMailBody } from "./mail-signature.service.js";
 
 export async function executeAdminInboxReply(params: {
   inboxRowId: number;
@@ -36,7 +37,13 @@ export async function executeAdminInboxReply(params: {
   }
 
   let newNotionPageId: string | null = null;
-  const signedBodyHtml = ensureSenderSignature(params.bodyHtml, mailbox.email, true);
+  const cfg = loadConfig();
+  const signedBodyHtml = ensureOutboundMailBody(
+    params.bodyHtml,
+    mailbox.email,
+    true,
+    cfg.mail.opt_out_footer_text,
+  );
   if (parentNotionPageId) {
     newNotionPageId = await createWebReplyNotionPage({
       receivingMailbox: mailbox.email,

@@ -242,6 +242,16 @@ const adminUISchema = z.object({
   session_max_age_ms: z.number().int().min(60_000).max(365 * 24 * 60 * 60 * 1000),
 });
 
+const mailSchema = z.object({
+  /** Appended after sender name signature on every outbound body. */
+  opt_out_footer_text: z.string().min(1),
+  /** Path segment for RFC 8058 one-click POST (joined with V2_PUBLIC_BASE_URL). */
+  list_unsubscribe_path: z.string().min(1),
+  /** HMAC secret for unsubscribe tokens (min 8 chars when headers are issued). */
+  list_unsubscribe_token_secret: z.string(),
+  list_unsubscribe_token_ttl_days: z.number().int().min(1).max(730),
+});
+
 export const configSchema = z
   .object({
     notion: notionSchema,
@@ -259,6 +269,7 @@ export const configSchema = z
     logging: loggingSchema,
     v2: v2Schema,
     admin: adminUISchema,
+    mail: mailSchema,
   })
   .superRefine((c, ctx) => {
     const keys = Object.keys(c.graph_apps);
@@ -437,6 +448,18 @@ export function loadConfig(): AppConfig {
       session_secret: sessionSecret,
       session_max_age_ms: envInt("ADMIN_SESSION_MAX_AGE_DAYS", 30) * 24 * 60 * 60 * 1000,
     },
+    mail: {
+      opt_out_footer_text: envStr(
+        "MAIL_OPT_OUT_FOOTER_TEXT",
+        "Not the right time? Reply 'stop' and I won't write again.",
+      ),
+      list_unsubscribe_path: envStr("LIST_UNSUBSCRIBE_PATH", "/unsubscribe"),
+      list_unsubscribe_token_secret:
+        envStr("LIST_UNSUBSCRIBE_TOKEN_SECRET", "") ||
+        envStr("V2_CLIENT_STATE_SECRET", "") ||
+        sessionSecret,
+      list_unsubscribe_token_ttl_days: envInt("LIST_UNSUBSCRIBE_TOKEN_TTL_DAYS", 365),
+    },
   };
 
   const parsed = configSchema.parse(raw);
@@ -508,6 +531,9 @@ export function printConfigSummary(cfg: AppConfig = loadConfig()): void {
   log("v2.disable_poll    =", cfg.v2.disable_polling_when_v2);
   log("v2.delta_interval_ms=", cfg.v2.delta_sync_interval_ms);
   log("admin.ui_enabled     =", cfg.admin.enabled);
+  log("mail.opt_out_footer  =", cfg.mail.opt_out_footer_text.slice(0, 48) + (cfg.mail.opt_out_footer_text.length > 48 ? "…" : ""));
+  log("mail.unsub_path      =", cfg.mail.list_unsubscribe_path);
+  log("mail.unsub_secret    =", mask(cfg.mail.list_unsubscribe_token_secret, 4, 2));
 }
 
 /** Test helper: drop the cached config so the next `loadConfig` re-reads env. */

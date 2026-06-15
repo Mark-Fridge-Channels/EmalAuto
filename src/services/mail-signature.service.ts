@@ -80,3 +80,47 @@ export function ensureSenderSignature(body: string, fromMailbox: string, isHtml:
   if (isHtml) return appendHtmlSignature(body, signatureName);
   return `${String(body ?? "").trimEnd()}\n\n${signatureName}`;
 }
+
+function normalizeFooterText(text: string): string {
+  return String(text ?? "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+}
+
+function hasComplianceFooter(body: string, footerText: string, isHtml: boolean): boolean {
+  const footer = normalizeFooterText(footerText);
+  if (!footer) return true;
+
+  const source = isHtml ? stripHtmlToText(authoredHtmlPart(body)) : String(body ?? "");
+  const normalized = normalizeFooterText(source);
+  return normalized.includes(footer);
+}
+
+function appendHtmlComplianceFooter(bodyHtml: string, footerText: string): string {
+  const marker = bodyHtml.search(/<(?:hr|blockquote)\b/i);
+  const beforeQuote = marker >= 0 ? bodyHtml.slice(0, marker).trimEnd() : bodyHtml.trimEnd();
+  const quote = marker >= 0 ? bodyHtml.slice(marker) : "";
+  const footer = escapeHtml(footerText.trim());
+  const block = `<p style="margin-top:1em;font-size:11px;color:#666;">${footer}</p>`;
+  return `${beforeQuote}${block}${quote}`;
+}
+
+/** Append opt-out compliance footer (env-configured); does not replace the sender name signature. */
+export function ensureComplianceFooter(body: string, footerText: string, isHtml: boolean): string {
+  const footer = footerText.trim();
+  if (!footer || hasComplianceFooter(body, footer, isHtml)) return body;
+  if (isHtml) return appendHtmlComplianceFooter(body, footer);
+  return `${String(body ?? "").trimEnd()}\n\n${footer}`;
+}
+
+/** Sender name signature + compliance opt-out footer. */
+export function ensureOutboundMailBody(
+  body: string,
+  fromMailbox: string,
+  isHtml: boolean,
+  optOutFooterText: string,
+): string {
+  const signed = ensureSenderSignature(body, fromMailbox, isHtml);
+  return ensureComplianceFooter(signed, optOutFooterText, isHtml);
+}
