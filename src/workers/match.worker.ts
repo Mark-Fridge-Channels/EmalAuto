@@ -24,6 +24,7 @@ import { findInboxById, markInboxIgnored, markInboxMatched } from "../db/reposit
 import { findMailboxById } from "../db/repositories/mailbox.repo.js";
 import { resolveInboundOutboundMatch } from "../services/reply-matcher.service.js";
 import { detectBounce } from "../services/bounce-detector.service.js";
+import { extractFailedRecipientEmails } from "../services/bounce-matcher.service.js";
 import { detectReplyKind } from "../services/auto-reply-detector.service.js";
 import { getMessageInternetHeaders } from "../graph/mail.service.js";
 import {
@@ -117,14 +118,30 @@ async function syncOutboundThreadStatusFromFinalizedInbox(
   }
 }
 
+function formatBounceReason(
+  bounce: ReturnType<typeof detectBounce>,
+  row: InboxMessage,
+  mailboxEmail: string,
+): string {
+  const failed = extractFailedRecipientEmails(
+    { subject: row.subject, bodyPreview: row.bodyPreview },
+    mailboxEmail,
+  );
+  const failedPart = failed.length ? `; failedRecipient=${failed.join(",")}` : "";
+  const preview = row.bodyPreview?.trim().replace(/\s+/g, " ").slice(0, 200);
+  const previewPart = preview ? `; ndrPreview="${preview}"` : "";
+  return `${bounce.reason}; subject="${row.subject}"; from=${row.fromEmail}${failedPart}${previewPart}`;
+}
+
 async function applyOutboundThreadStatus(
   matched: MatchResult,
   bounce: ReturnType<typeof detectBounce>,
   row: InboxMessage,
+  mailboxEmail: string,
 ): Promise<void> {
   if (!matched.outboundId) return;
   if (bounce.isBounce) {
-    const reason = `${bounce.reason}; subject="${row.subject}"; from=${row.fromEmail}`;
+    const reason = formatBounceReason(bounce, row, mailboxEmail);
     await markOutboundBounce(matched.outboundId, reason);
     return;
   }
@@ -186,7 +203,7 @@ async function processMatch(job: Job<MatchJobData>): Promise<void> {
   }
 
   if (bounce.isBounce && matched.outboundId) {
-    const bounceReason = `${bounce.reason}; subject="${row.subject}"; from=${row.fromEmail}`;
+    const bounceReason = formatBounceReason(bounce, row, mailboxEmail);
     await markOutboundBounce(matched.outboundId, bounceReason);
     const { crm } = await syncInboxCrmFromMatch(row.id, matched.outboundId, matched.notionPageId);
     if (matched.notionPageId) {
@@ -302,7 +319,7 @@ async function processMatch(job: Job<MatchJobData>): Promise<void> {
     return;
   }
 
-  await applyOutboundThreadStatus(matched, bounce, row);
+  await applyOutboundThreadStatus(matched, bounce, row, mailboxEmail);
   const { crm, ob } = await syncInboxCrmFromMatch(row.id, matched.outboundId, matched.notionPageId);
   await markInboxMatched(row.id, matched.outboundId, "matched");
   await upsertConversation(row.conversationId, matched.notionPageId ?? null, row.id, row.receivedAt);

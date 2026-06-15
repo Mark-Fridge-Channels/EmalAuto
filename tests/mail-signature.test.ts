@@ -8,9 +8,11 @@ import {
   signatureNameFromMailbox,
 } from "../src/services/mail-signature.service.js";
 import {
-  buildListUnsubscribeHeaders,
+  buildListUnsubscribeExtendedProperty,
+  buildListUnsubscribeGraphProps,
   canIssueListUnsubscribeHeaders,
   createUnsubscribeToken,
+  LIST_UNSUBSCRIBE_MAPI_PROPERTY_ID,
   verifyUnsubscribeToken,
 } from "../src/services/list-unsubscribe.service.js";
 
@@ -69,16 +71,22 @@ test("list-unsubscribe token round-trip", () => {
   }
 });
 
-test("buildListUnsubscribeHeaders follows RFC 8058 shape", () => {
-  const headers = buildListUnsubscribeHeaders({
+test("buildListUnsubscribeGraphProps uses MAPI PidTagListUnsubscribe", () => {
+  const props = buildListUnsubscribeGraphProps({
     publicBaseUrl: "https://api.example.com",
     unsubscribePath: "/unsubscribe",
     token: "tok",
   });
-  assert.deepEqual(headers, [
-    { name: "List-Unsubscribe", value: "<https://api.example.com/unsubscribe/tok>" },
-    { name: "List-Unsubscribe-Post", value: "List-Unsubscribe=One-Click" },
+  assert.deepEqual(props, [
+    {
+      id: LIST_UNSUBSCRIBE_MAPI_PROPERTY_ID,
+      value: "<https://api.example.com/unsubscribe/tok>",
+    },
   ]);
+  assert.equal(
+    buildListUnsubscribeExtendedProperty("https://api.example.com/unsubscribe/tok").value,
+    "<https://api.example.com/unsubscribe/tok>",
+  );
 });
 
 test("canIssueListUnsubscribeHeaders requires https public base", () => {

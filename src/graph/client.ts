@@ -54,6 +54,50 @@ function buildUrl(path: string, query?: GraphFetchOptions["query"]): string {
   return url.toString();
 }
 
+/** POST sendMail with MIME body (request body = base64-encoded MIME, Content-Type: text/plain). */
+export async function graphSendMailMime(actorMailbox: string, mimeUtf8: string, attempt = 0): Promise<void> {
+  const token = await acquireGraphTokenForMailbox(actorMailbox);
+  const url = buildUrl(`/users/${encodeURIComponent(actorMailbox)}/sendMail`);
+  const body = Buffer.from(mimeUtf8, "utf8").toString("base64");
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "text/plain",
+    },
+    body,
+  });
+
+  if (res.status === 401 && attempt === 0) {
+    await acquireGraphTokenForMailbox(actorMailbox, { force: true });
+    return graphSendMailMime(actorMailbox, mimeUtf8, attempt + 1);
+  }
+
+  if (res.status === 429 || res.status === 503) {
+    if (attempt < 5) {
+      const ra = parseInt(res.headers.get("retry-after") ?? "", 10);
+      const backoff = Number.isFinite(ra) && ra > 0 ? ra * 1000 : Math.min(16_000, 500 * 2 ** attempt);
+      logger.warn({ status: res.status, attempt, backoff }, "graph MIME sendMail throttled, backing off");
+      await sleep(backoff);
+      return graphSendMailMime(actorMailbox, mimeUtf8, attempt + 1);
+    }
+  }
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    let parsed: any = {};
+    try {
+      parsed = text ? JSON.parse(text) : {};
+    } catch {
+      parsed = { raw: text };
+    }
+    const code = parsed?.error?.code ?? "";
+    const msg = parsed?.error?.message ?? `Graph MIME sendMail error: HTTP ${res.status}`;
+    throw new GraphApiError(`[${code || res.status}] ${msg}`, res.status, code, parsed);
+  }
+}
+
 export async function graphFetch<T = unknown>(opts: GraphFetchOptions): Promise<T> {
   const { method, path, actorMailbox, body, query, attempt = 0, expectEmpty = false } = opts;
   const token = await acquireGraphTokenForMailbox(actorMailbox);

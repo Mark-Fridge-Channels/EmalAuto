@@ -1,14 +1,11 @@
-/**
- * RFC 8058 one-click unsubscribe endpoint (Gmail / Outlook POST).
- *
- * Always registered on the API process — uses `V2_PUBLIC_BASE_URL` + token in
- * outbound `List-Unsubscribe` headers (Send Email only).
- */
-
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { loadConfig } from "../config/index.js";
 import { recordEmailSuppression } from "../db/repositories/email-suppression.repo.js";
 import { verifyUnsubscribeToken } from "../services/list-unsubscribe.service.js";
+import {
+  isOneClickUnsubscribeBody,
+  parseOneClickUnsubscribeBody,
+} from "../services/unsubscribe-post.service.js";
 import { logger } from "../utils/logger.js";
 
 function unsubscribePath(cfg: ReturnType<typeof loadConfig>): string {
@@ -16,13 +13,35 @@ function unsubscribePath(cfg: ReturnType<typeof loadConfig>): string {
   return p.startsWith("/") ? p : `/${p}`;
 }
 
-function isOneClickPost(req: FastifyRequest): boolean {
-  const body = req.body;
-  if (body && typeof body === "object" && !Array.isArray(body)) {
-    const v = (body as Record<string, unknown>)["List-Unsubscribe"];
-    if (typeof v === "string" && v.trim().toLowerCase() === "one-click") return true;
+async function handleUnsubscribeToken(
+  token: string,
+  reply: FastifyReply,
+): Promise<FastifyReply> {
+  const cfg = loadConfig();
+  const verified = verifyUnsubscribeToken(token, cfg.mail.list_unsubscribe_token_secret);
+  if (!verified.ok) {
+    logger.warn({ reason: verified.reason }, "unsubscribe: invalid token");
+    return reply.code(400).type("text/plain").send("invalid unsubscribe link");
   }
-  return false;
+
+  const { recipientEmail, notionPageId } = verified.payload;
+  const result = await recordEmailSuppression({
+    email: recipientEmail,
+    notionPageId,
+    source: "list_unsubscribe_one_click",
+  });
+
+  logger.info(
+    {
+      email: recipientEmail,
+      notionPageId,
+      inserted: result.inserted,
+      suppressionId: result.id,
+    },
+    "unsubscribe: one-click opt-out recorded",
+  );
+
+  return reply.code(200).type("text/plain").send("ok");
 }
 
 export async function registerUnsubscribeRoutes(app: FastifyInstance): Promise<void> {
@@ -41,34 +60,37 @@ export async function registerUnsubscribeRoutes(app: FastifyInstance): Promise<v
     },
   );
 
+  app.addContentTypeParser(
+    "multipart/form-data",
+    { parseAs: "string" },
+    (req, body, done) => {
+      const raw = typeof body === "string" ? body : "";
+      if (parseOneClickUnsubscribeBody(req.headers["content-type"], raw)) {
+        done(null, { "List-Unsubscribe": "One-Click" });
+        return;
+      }
+      done(null, {});
+    },
+  );
+
   app.post(path, async (req: FastifyRequest<{ Params: { token: string } }>, reply: FastifyReply) => {
-    if (!isOneClickPost(req)) {
+    const raw = typeof req.body === "string" ? req.body : "";
+    const ok =
+      isOneClickUnsubscribeBody(req.body) ||
+      parseOneClickUnsubscribeBody(req.headers["content-type"], raw);
+    if (!ok) {
       return reply.code(400).type("text/plain").send("expected List-Unsubscribe=One-Click");
     }
+    return handleUnsubscribeToken(req.params.token, reply);
+  });
 
+  /** Gmail / validators may probe with GET before showing the inbox chip. */
+  app.get(path, async (req: FastifyRequest<{ Params: { token: string } }>, reply: FastifyReply) => {
+    const cfg = loadConfig();
     const verified = verifyUnsubscribeToken(req.params.token, cfg.mail.list_unsubscribe_token_secret);
     if (!verified.ok) {
-      logger.warn({ reason: verified.reason }, "unsubscribe: invalid token");
       return reply.code(400).type("text/plain").send("invalid unsubscribe link");
     }
-
-    const { recipientEmail, notionPageId } = verified.payload;
-    const result = await recordEmailSuppression({
-      email: recipientEmail,
-      notionPageId,
-      source: "list_unsubscribe_one_click",
-    });
-
-    logger.info(
-      {
-        email: recipientEmail,
-        notionPageId,
-        inserted: result.inserted,
-        suppressionId: result.id,
-      },
-      "unsubscribe: one-click opt-out recorded",
-    );
-
     return reply.code(200).type("text/plain").send("ok");
   });
 }

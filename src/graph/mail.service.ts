@@ -4,7 +4,8 @@
  * Spec reference: https://learn.microsoft.com/graph/api/user-sendmail
  */
 
-import { graphFetch, graphFetchAbsolute, GraphApiError, graphFetchBinary } from "./client.js";
+import { graphFetch, graphFetchAbsolute, graphSendMailMime, GraphApiError, graphFetchBinary } from "./client.js";
+import { buildOutboundMimeMessage } from "../services/mime-mail.service.js";
 
 export interface OutboundDraft {
   /** Sender mailbox UPN / SMTP address. */
@@ -17,8 +18,8 @@ export interface OutboundDraft {
   bodyHtml: string;
   /** When the body is plain text instead of HTML. */
   isHtml?: boolean;
-  /** RFC 2369 / 8058 List-Unsubscribe headers (cold outreach Send Email only). */
-  internetMessageHeaders?: Array<{ name: string; value: string }>;
+  /** When set, send via MIME so List-Unsubscribe + List-Unsubscribe-Post headers are included (RFC 8058). */
+  listUnsubscribeUrl?: string;
   /**
    * When set (with Notion Action = reply), send uses Graph `createReply` → PATCH
    * body → `send` so the mail stays in the same conversation/thread.
@@ -129,6 +130,20 @@ export async function sendMailReplyInThread(params: {
  * GET to retrieve the saved Sent Items message metadata.
  */
 export async function sendMail(draft: OutboundDraft): Promise<void> {
+  if (draft.listUnsubscribeUrl?.trim()) {
+    const mime = buildOutboundMimeMessage({
+      fromMailbox: draft.fromMailbox,
+      to: draft.to,
+      cc: draft.cc,
+      bcc: draft.bcc,
+      subject: draft.subject,
+      bodyHtml: draft.bodyHtml,
+      listUnsubscribeUrl: draft.listUnsubscribeUrl.trim(),
+    });
+    await graphSendMailMime(draft.fromMailbox, mime);
+    return;
+  }
+
   const recipients = (addrs: string[] | undefined) =>
     (addrs ?? [])
       .map((a) => a.trim())
@@ -150,9 +165,6 @@ export async function sendMail(draft: OutboundDraft): Promise<void> {
         toRecipients: recipients(draft.to),
         ccRecipients: recipients(draft.cc),
         bccRecipients: recipients(draft.bcc),
-        ...(draft.internetMessageHeaders?.length
-          ? { internetMessageHeaders: draft.internetMessageHeaders }
-          : {}),
       },
       saveToSentItems: true,
     },

@@ -247,6 +247,8 @@ const mailSchema = z.object({
   opt_out_footer_text: z.string().min(1),
   /** Path segment for RFC 8058 one-click POST (joined with V2_PUBLIC_BASE_URL). */
   list_unsubscribe_path: z.string().min(1),
+  /** HTTPS origin for one-click URLs (`LIST_UNSUBSCRIBE_PUBLIC_BASE_URL` or `V2_PUBLIC_BASE_URL`). */
+  list_unsubscribe_public_base_url: z.string(),
   /** HMAC secret for unsubscribe tokens (min 8 chars when headers are issued). */
   list_unsubscribe_token_secret: z.string(),
   list_unsubscribe_token_ttl_days: z.number().int().min(1).max(730),
@@ -454,6 +456,8 @@ export function loadConfig(): AppConfig {
         "Not the right time? Reply 'stop' and I won't write again.",
       ),
       list_unsubscribe_path: envStr("LIST_UNSUBSCRIBE_PATH", "/unsubscribe"),
+      list_unsubscribe_public_base_url:
+        envStr("LIST_UNSUBSCRIBE_PUBLIC_BASE_URL", "") || envStr("V2_PUBLIC_BASE_URL", ""),
       list_unsubscribe_token_secret:
         envStr("LIST_UNSUBSCRIBE_TOKEN_SECRET", "") ||
         envStr("V2_CLIENT_STATE_SECRET", "") ||
@@ -533,6 +537,7 @@ export function printConfigSummary(cfg: AppConfig = loadConfig()): void {
   log("admin.ui_enabled     =", cfg.admin.enabled);
   log("mail.opt_out_footer  =", cfg.mail.opt_out_footer_text.slice(0, 48) + (cfg.mail.opt_out_footer_text.length > 48 ? "…" : ""));
   log("mail.unsub_path      =", cfg.mail.list_unsubscribe_path);
+  log("mail.unsub_base      =", cfg.mail.list_unsubscribe_public_base_url || "(empty)");
   log("mail.unsub_secret    =", mask(cfg.mail.list_unsubscribe_token_secret, 4, 2));
 }
 

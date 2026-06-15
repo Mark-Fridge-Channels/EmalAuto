@@ -91,7 +91,40 @@ export function buildUnsubscribeUrl(params: {
   return `${base}${path}/${encodeURIComponent(params.token)}`;
 }
 
-/** RFC 8058 headers for Graph `internetMessageHeaders`. */
+/** RFC 2369 + 8058: mailto + https (Gmail prefers both). */
+export function buildListUnsubscribeHeaderValue(fromMailbox: string, httpsUrl: string): string {
+  const email = fromMailbox.trim();
+  const mailto = `<mailto:${email}?subject=${encodeURIComponent("unsubscribe")}>`;
+  const https = httpsUrl.trim().startsWith("<") ? httpsUrl.trim() : `<${httpsUrl.trim()}>`;
+  return `${mailto}, ${https}`;
+}
+
+/** MAPI PidTagListUnsubscribe (0x1045) — Graph only accepts List-Unsubscribe via this, not internetMessageHeaders. */
+export const LIST_UNSUBSCRIBE_MAPI_PROPERTY_ID = "String 0x1045";
+
+export function buildListUnsubscribeExtendedProperty(unsubscribeUrl: string): {
+  id: string;
+  value: string;
+} {
+  const url = unsubscribeUrl.trim();
+  const wrapped = url.startsWith("<") ? url : `<${url}>`;
+  return { id: LIST_UNSUBSCRIBE_MAPI_PROPERTY_ID, value: wrapped };
+}
+
+/**
+ * Graph sendMail payload fragment for List-Unsubscribe (MAPI 0x1045).
+ * Prefer MIME send via `listUnsubscribeUrl` on OutboundDraft for List-Unsubscribe-Post.
+ */
+export function buildListUnsubscribeGraphProps(params: {
+  publicBaseUrl: string;
+  unsubscribePath: string;
+  token: string;
+}): Array<{ id: string; value: string }> {
+  const url = buildUnsubscribeUrl(params);
+  return [buildListUnsubscribeExtendedProperty(url)];
+}
+
+/** @deprecated Graph ignores non-x- headers in internetMessageHeaders; use buildListUnsubscribeGraphProps. */
 export function buildListUnsubscribeHeaders(params: {
   publicBaseUrl: string;
   unsubscribePath: string;
