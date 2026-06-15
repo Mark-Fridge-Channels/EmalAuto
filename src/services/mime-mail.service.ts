@@ -20,21 +20,20 @@ function foldBase64(b64: string, lineLen = 76): string {
   return lines.join("\r\n");
 }
 
-/** RFC 5322 header folding (76-char lines). */
-function foldHeader(name: string, value: string, maxLine = 76): string {
-  const prefix = `${name}: `;
-  if (prefix.length + value.length <= maxLine) {
-    return `${prefix}${value}`;
+/**
+ * RFC 5322 List-Unsubscribe — fold only at the comma between mailto and https.
+ * Never fold inside `https://` (76-char folding breaks the URL).
+ */
+function formatListUnsubscribeHeader(value: string): string {
+  const prefix = "List-Unsubscribe: ";
+  const full = `${prefix}${value}`;
+  if (full.length <= 998) return full;
+
+  const match = value.match(/^(<mailto:[^>]+>),\s*(<https?:\/\/[^>]+>)$/);
+  if (match) {
+    return `${prefix}${match[1]},\r\n ${match[2]}`;
   }
-  const lines: string[] = [];
-  let rest = value;
-  lines.push(`${prefix}${rest.slice(0, maxLine - prefix.length)}`);
-  rest = rest.slice(maxLine - prefix.length);
-  while (rest.length > 0) {
-    lines.push(` ${rest.slice(0, maxLine - 1)}`);
-    rest = rest.slice(maxLine - 1);
-  }
-  return lines.join("\r\n");
+  return full;
 }
 
 function formatFrom(mailbox: string): string {
@@ -99,7 +98,7 @@ export function buildOutboundMimeMessage(params: {
     `Date: ${formatRfc2822Date()}`,
     `Message-ID: ${messageIdFromMailbox(params.fromMailbox)}`,
     "MIME-Version: 1.0",
-    foldHeader("List-Unsubscribe", listUnsub),
+    formatListUnsubscribeHeader(listUnsub),
     "List-Unsubscribe-Post: List-Unsubscribe=One-Click",
     `Content-Type: multipart/alternative; boundary="${boundary}"`,
   ].filter((line): line is string => line != null);

@@ -27,17 +27,15 @@ test("buildOutboundMimeMessage includes RFC 8058 unsubscribe headers", () => {
   assert.equal(html, "<p>Hi</p>");
 });
 
-test("buildOutboundMimeMessage folds long List-Unsubscribe headers", () => {
-  const longUrl = `https://api.example.com/unsubscribe/${"a".repeat(200)}`;
+test("buildOutboundMimeMessage keeps List-Unsubscribe URL intact", () => {
+  const longUrl = `https://email_webhook.fridgechannels.com/unsubscribe/${"a".repeat(200)}`;
   const mime = buildOutboundMimeMessage({
-    fromMailbox: "kacey@getfridgechannel.com",
-    to: ["test@gmail.com"],
+    fromMailbox: "billy@fridgeteam.com",
+    to: ["mark@fridgechannels.com"],
     subject: "Hello",
-    bodyHtml: "<p>Hi</p>",
+    bodyHtml: "<div>Hi</div>",
     listUnsubscribeUrl: longUrl,
   });
-  const listUnsubLines = mime
-    .split("\r\n")
-    .filter((line) => line.startsWith("List-Unsubscribe:") || /^\shttps?:\/\//.test(line));
-  assert.ok(listUnsubLines.length > 1, "expected folded List-Unsubscribe header");
+  assert.doesNotMatch(mime, /<https:\s+\/\//);
+  assert.match(mime, new RegExp(longUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 });

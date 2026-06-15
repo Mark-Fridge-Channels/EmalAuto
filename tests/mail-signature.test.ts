@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  coercePlainTextToHtml,
   ensureComplianceFooter,
   ensureOutboundMailBody,
   ensureSenderSignature,
@@ -54,6 +55,14 @@ test("ensureOutboundMailBody adds signature then footer", () => {
 test("ensureComplianceFooter does not duplicate existing footer", () => {
   const body = `Hello\n\nBilly\n\n${FOOTER}`;
   assert.equal(ensureComplianceFooter(body, FOOTER, false), body);
+});
+
+test("coercePlainTextToHtml preserves line breaks for MIME HTML part", () => {
+  const plain = `Hello\n\nBilly\n\n${FOOTER}`;
+  const html = coercePlainTextToHtml(plain);
+  assert.match(html, /<div>Hello<br><br>Billy<br><br>/);
+  assert.match(html, /write again\./);
+  assert.equal(coercePlainTextToHtml("<p>Already HTML</p>"), "<p>Already HTML</p>");
 });
 
 test("list-unsubscribe token round-trip", () => {

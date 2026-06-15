@@ -29,7 +29,7 @@ import {
   extractCrmFromInteractionLogPage,
 } from "../notion/crm-snapshot.js";
 import { updateOutboundCrmFields } from "../db/repositories/outbound.repo.js";
-import { ensureOutboundMailBody } from "../services/mail-signature.service.js";
+import { coercePlainTextToHtml, ensureOutboundMailBody } from "../services/mail-signature.service.js";
 import {
   buildUnsubscribeUrl,
   canIssueListUnsubscribeHeaders,
@@ -123,6 +123,8 @@ async function process(job: Job<SendJobData>): Promise<void> {
         unsubscribePath: cfg.mail.list_unsubscribe_path,
         token,
       });
+      draft.bodyHtml = coercePlainTextToHtml(draft.bodyHtml);
+      draft.isHtml = true;
       logger.info(
         { notionPageId, to: draft.to[0], unsubUrlPrefix: publicBase },
         "send: MIME outbound with List-Unsubscribe + List-Unsubscribe-Post",

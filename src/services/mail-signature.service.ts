@@ -114,6 +114,19 @@ export function ensureComplianceFooter(body: string, footerText: string, isHtml:
   return `${String(body ?? "").trimEnd()}\n\n${footer}`;
 }
 
+/** Wrap plain-text bodies as HTML so MIME multipart/html renders line breaks correctly. */
+export function coercePlainTextToHtml(body: string): string {
+  const trimmed = String(body ?? "").trim();
+  if (!trimmed) return "";
+
+  if (/<\s*(?:html|head|body|p|div|br|table|ul|ol|blockquote|h[1-6])\b/i.test(trimmed)) {
+    return trimmed;
+  }
+
+  const escaped = escapeHtml(trimmed);
+  return `<div>${escaped.replace(/\r\n|\r|\n/g, "<br>")}</div>`;
+}
+
 /** Sender name signature + compliance opt-out footer. */
 export function ensureOutboundMailBody(
   body: string,
