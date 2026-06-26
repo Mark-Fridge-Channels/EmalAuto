@@ -18,7 +18,7 @@ import { logger } from "../utils/logger.js";
 import { getRedis } from "../queues/connection.js";
 import { QUEUE_NAMES, type SendJobData } from "../queues/queues.js";
 import { buildSendJobFromNotion, resolveOutboundBodyHtml } from "../services/job-builder.service.js";
-import { resolveDtcOutboundSend, updateDtcEntityColdReachAfterSend } from "../notion/dtc-send.js";
+import { resolveDtcOutboundSend } from "../notion/dtc-send.js";
 import { findRecentSentMessage, sendMail, sendMailReplyInThread, type SentItemsLookupHit } from "../graph/mail.service.js";
 import { findMailboxByEmail } from "../db/repositories/mailbox.repo.js";
 import { recordOutbound, updateOutboundBody } from "../services/message-store.service.js";
@@ -234,25 +234,6 @@ async function process(job: Job<SendJobData>): Promise<void> {
       internetMessageId: hit.internetMessageId,
       sentAt,
     });
-
-    if (built.dtc && built.actionType === "send") {
-      try {
-        await updateDtcEntityColdReachAfterSend(built.dtc, loadConfig());
-        logger.info(
-          {
-            notionPageId,
-            entityPageId: built.dtc.entityPageId,
-            targetStatus: built.dtc.targetStatus,
-          },
-          "send: DTC Entity ColdReach Status updated",
-        );
-      } catch (err) {
-        logger.error(
-          { err, notionPageId, entityPageId: built.dtc.entityPageId },
-          "send: DTC Entity ColdReach update failed after successful send",
-        );
-      }
-    }
 
     logger.info(
       {

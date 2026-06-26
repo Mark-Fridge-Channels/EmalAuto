@@ -6,8 +6,7 @@
  *     ↓ resolveInboundOutboundMatch (conversationId → bounce recipient → legacy)
  *     ├── matched + bounce → mark outbound bounce + write Notion bounce
  *     ├── matched + auto-reply → link inbox only (no reply_received / no IL child)
- *     ├── matched + human reply → Notion Inbound Reply child + parent Done;
- *     │                           DTC Entity ColdReach → Humen
+ *     ├── matched + human reply → Notion Inbound Reply child + parent Done
  *     └── unmatched        → mark inbox ignored, no Notion writeback
  *
  * Idempotency: inbox rows already in `matched` / `bounce` state are skipped for
@@ -33,11 +32,7 @@ import {
   findOutboundById,
 } from "../services/message-store.service.js";
 import { upsertConversation } from "../db/repositories/conversation.repo.js";
-import {
-  markDtcEntityColdReachOnHumanReply,
-  rollbackDtcEntityColdReachOnBounce,
-  markDtcKeyPersonEmailFailedOnBounce,
-} from "../notion/dtc-send.js";
+import { markDtcKeyPersonEmailFailedOnBounce } from "../notion/dtc-send.js";
 import { createInboundReplyRow, markOriginalReplyDone, writeBounce } from "../notion/writer.js";
 import { getPage } from "../notion/client.js";
 import { extractCrmFromInteractionLogPage } from "../notion/crm-snapshot.js";
@@ -217,24 +212,6 @@ async function processMatch(job: Job<MatchJobData>): Promise<void> {
       });
       const cfg = loadConfig();
       try {
-        const rollback = await rollbackDtcEntityColdReachOnBounce(matched.notionPageId, cfg);
-        if (rollback.rolledBack) {
-          logger.info(
-            {
-              notionPageId: matched.notionPageId,
-              entityPageId: rollback.entityPageId,
-              currentStatus: rollback.currentStatus,
-            },
-            "match: DTC Entity ColdReach Status rolled back after bounce",
-          );
-        }
-      } catch (err) {
-        logger.error(
-          { err, notionPageId: matched.notionPageId, inboxRowId: row.id },
-          "match: DTC Entity ColdReach rollback failed after bounce",
-        );
-      }
-      try {
         const kpMark = await markDtcKeyPersonEmailFailedOnBounce(cfg, {
           ilNotionPageId: matched.notionPageId,
           keyPersonNotionUrl: crm.keyPersonNotionUrl,
@@ -320,41 +297,9 @@ async function processMatch(job: Job<MatchJobData>): Promise<void> {
   }
 
   await applyOutboundThreadStatus(matched, bounce, row, mailboxEmail);
-  const { crm, ob } = await syncInboxCrmFromMatch(row.id, matched.outboundId, matched.notionPageId);
+  await syncInboxCrmFromMatch(row.id, matched.outboundId, matched.notionPageId);
   await markInboxMatched(row.id, matched.outboundId, "matched");
   await upsertConversation(row.conversationId, matched.notionPageId ?? null, row.id, row.receivedAt);
-
-  try {
-    const humanMark = await markDtcEntityColdReachOnHumanReply(loadConfig(), {
-      ilNotionPageId: matched.notionPageId,
-      entityNotionUrl: crm.entityNotionUrl ?? ob?.entityNotionUrl,
-    });
-    if (humanMark.updated) {
-      logger.info(
-        {
-          notionPageId: matched.notionPageId,
-          entityPageId: humanMark.entityPageId,
-          status: humanMark.status,
-          source: humanMark.source,
-        },
-        "match: DTC Entity ColdReach Status set after human reply",
-      );
-    } else {
-      logger.warn(
-        {
-          notionPageId: matched.notionPageId,
-          outboundId: matched.outboundId,
-          source: humanMark.source,
-        },
-        "match: DTC Entity ColdReach Humen not updated (no entity page resolved)",
-      );
-    }
-  } catch (err) {
-    logger.error(
-      { err, notionPageId: matched.notionPageId, inboxRowId: row.id },
-      "match: DTC Entity Humen update failed after human reply",
-    );
-  }
 
   if (matched.notionPageId) {
     const receivingMailbox = await emailForMailboxId(row.mailboxId);
