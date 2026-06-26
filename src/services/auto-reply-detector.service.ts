@@ -1,6 +1,11 @@
 /**
  * Heuristic auto-reply vs human reply classifier (RFC 3834 headers + subject/body).
+ *
+ * NDR / delivery-failure messages also use Auto-Submitted: auto-generated; those are
+ * handled by bounce detection and must not be classified here as auto-replies.
  */
+
+import { detectBounce } from "./bounce-detector.service.js";
 
 export type ReplyKind = "human" | "auto";
 
@@ -15,8 +20,6 @@ const SUBJECT_AUTO_PATTERNS = [
   /auto[\s-]?reply/i,
   /vacation\s+reply/i,
   /away\s+from\s+(the\s+)?office/i,
-  /delivery\s+notification/i,
-  /undeliverable/i,
   /不在办公室/,
   /外出/,
   /休假/,
@@ -80,10 +83,21 @@ function classifyFromHeaders(headers: Array<{ name?: string; value?: string }>):
 }
 
 export function detectReplyKind(input: {
+  fromEmail?: string;
   subject: string;
   bodyPreview: string;
   headers?: Array<{ name?: string; value?: string }>;
 }): ReplyKindVerdict {
+  const bounce = detectBounce({
+    fromEmail: input.fromEmail ?? "",
+    subject: input.subject,
+    bodyPreview: input.bodyPreview,
+    headers: input.headers,
+  });
+  if (bounce.isBounce) {
+    return { kind: "human", reason: `bounce detected (${bounce.reason}); not an auto-reply` };
+  }
+
   if (input.headers?.length) {
     const fromHeaders = classifyFromHeaders(input.headers);
     if (fromHeaders) return fromHeaders;

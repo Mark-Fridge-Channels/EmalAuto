@@ -116,7 +116,11 @@ export async function resolveInboundOutboundMatch(
   const byConv = await findOutboundMatchByConversation(inbox.conversationId);
   if (byConv.matched) return byConv;
 
-  const bounce = detectBounce({ fromEmail: inbox.fromEmail, subject: inbox.subject });
+  const bounce = detectBounce({
+    fromEmail: inbox.fromEmail,
+    subject: inbox.subject,
+    bodyPreview: inbox.bodyPreview ?? "",
+  });
   if (bounce.isBounce) {
     const byRecipient = await findBounceOutboundMatch(
       { ...inbox, bodyPreview: inbox.bodyPreview ?? "" },

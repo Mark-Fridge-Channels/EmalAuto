@@ -170,7 +170,11 @@ async function runHeuristicMatch(dry: boolean): Promise<HeuristicStats> {
   for (const row of inboxRows) {
     stats.scanned += 1;
 
-    const bounce = detectBounce({ fromEmail: row.fromEmail, subject: row.subject });
+    const bounce = detectBounce({
+      fromEmail: row.fromEmail,
+      subject: row.subject,
+      bodyPreview: row.bodyPreview,
+    });
     if (bounce.isBounce) {
       stats.skippedBounce += 1;
       continue;

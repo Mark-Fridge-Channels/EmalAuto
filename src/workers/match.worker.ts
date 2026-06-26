@@ -150,12 +150,15 @@ async function processMatch(job: Job<MatchJobData>): Promise<void> {
     return;
   }
 
-  const bounce = detectBounce({ fromEmail: row.fromEmail, subject: row.subject });
-
   // Idempotency guard. Since we now CREATE a child Notion row (instead of
   // patching the parent), re-running on a row whose match_status is already
   // matched/bounce would produce a duplicate. Skip those.
   if (row.matchStatus === "matched" || row.matchStatus === "bounce" || row.matchStatus === "auto_reply") {
+    const bounce = detectBounce({
+      fromEmail: row.fromEmail,
+      subject: row.subject,
+      bodyPreview: row.bodyPreview,
+    });
     await syncOutboundThreadStatusFromFinalizedInbox(row, bounce);
     logger.debug(
       { inboxRowId: row.id, matchStatus: row.matchStatus },
@@ -166,6 +169,22 @@ async function processMatch(job: Job<MatchJobData>): Promise<void> {
 
   const mailbox = await findMailboxById(row.mailboxId);
   const mailboxEmail = mailbox?.email ?? "";
+
+  let headers: Array<{ name: string; value: string }> = [];
+  if (mailboxEmail) {
+    try {
+      headers = await getMessageInternetHeaders(mailboxEmail, row.graphMessageId);
+    } catch (err) {
+      logger.warn({ err, inboxRowId: row.id }, "match: failed to fetch internetMessageHeaders");
+    }
+  }
+
+  const bounce = detectBounce({
+    fromEmail: row.fromEmail,
+    subject: row.subject,
+    bodyPreview: row.bodyPreview,
+    headers,
+  });
 
   const matched = await resolveInboundOutboundMatch(
     {
@@ -266,15 +285,8 @@ async function processMatch(job: Job<MatchJobData>): Promise<void> {
 
   if (!matched.outboundId) return;
 
-  let headers: Array<{ name: string; value: string }> = [];
-  if (mailboxEmail) {
-    try {
-      headers = await getMessageInternetHeaders(mailboxEmail, row.graphMessageId);
-    } catch (err) {
-      logger.warn({ err, inboxRowId: row.id }, "match: failed to fetch internetMessageHeaders; using subject/body only");
-    }
-  }
   const replyKind = detectReplyKind({
+    fromEmail: row.fromEmail,
     subject: row.subject,
     bodyPreview: row.bodyPreview,
     headers,

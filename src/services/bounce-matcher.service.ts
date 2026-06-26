@@ -156,7 +156,11 @@ export async function findBounceOutboundMatch(
   inbox: InboundMatchInput & { bodyPreview: string },
   mailboxEmail: string,
 ): Promise<MatchResult> {
-  const bounce = detectBounce({ fromEmail: inbox.fromEmail, subject: inbox.subject });
+  const bounce = detectBounce({
+    fromEmail: inbox.fromEmail,
+    subject: inbox.subject,
+    bodyPreview: inbox.bodyPreview,
+  });
   if (!bounce.isBounce) {
     return { matched: false, reason: "not a bounce" };
   }
