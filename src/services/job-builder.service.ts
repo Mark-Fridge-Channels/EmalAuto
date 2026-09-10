@@ -88,7 +88,8 @@ export async function buildSendJobFromNotion(notionPageId: string): Promise<Buil
   const page = await getPage(notionPageId);
   const { pick } = buildPropertyResolver(cfg);
 
-  const senderEmail = normalizeEmail(readRichText(pick(page.properties, "sender_email")));
+  const senderProp = pick(page.properties, "sender_email");
+  const senderEmail = normalizeEmail(readEmail(senderProp) || readRichText(senderProp));
   const subject = readRichText(pick(page.properties, "subject"));
 
   const payloadText = readRichText(pick(page.properties, "payload"));
