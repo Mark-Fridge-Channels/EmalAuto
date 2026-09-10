@@ -19,11 +19,17 @@ import { getRedis } from "../queues/connection.js";
 import { QUEUE_NAMES, type SendJobData } from "../queues/queues.js";
 import { buildSendJobFromNotion, resolveOutboundBodyHtml } from "../services/job-builder.service.js";
 import { resolveDtcOutboundSend } from "../notion/dtc-send.js";
+import {
+  isCampaignHistoryPage,
+  resolveCampaignOutboundSend,
+} from "../campaign/resolve-send.js";
+import { resolveCampaignCopy } from "../campaign/render-for-send.js";
+import { lockActiveKeyPersonAfterSend } from "../campaign/lifecycle.js";
 import { findRecentSentMessage, sendMail, sendMailReplyInThread, type SentItemsLookupHit } from "../graph/mail.service.js";
 import { findMailboxByEmail } from "../db/repositories/mailbox.repo.js";
 import { recordOutbound, updateOutboundBody } from "../services/message-store.service.js";
 import { markSending, writeSendFailure, writeSendSuccess } from "../notion/writer.js";
-import { getPage } from "../notion/client.js";
+import { getPage, updatePage } from "../notion/client.js";
 import {
   extractCrmFromDtcPageIds,
   extractCrmFromInteractionLogPage,
@@ -35,7 +41,15 @@ import {
   canIssueListUnsubscribeHeaders,
   createUnsubscribeToken,
 } from "../services/list-unsubscribe.service.js";
+import {
+  buildOpenPixelUrl,
+  canIssueOpenTracking,
+  createOpenTrackToken,
+  injectOpenPixel,
+} from "../services/open-tracking.service.js";
+import { notionRichText } from "../notion/property-mapper.js";
 import { sleep } from "../utils/sleep.js";
+import type { CampaignSendBundle } from "../campaign/resolve-send.js";
 
 let worker: Worker<SendJobData> | null = null;
 
@@ -66,22 +80,61 @@ async function process(job: Job<SendJobData>): Promise<void> {
     );
     return;
   }
+  let campaignBundle: CampaignSendBundle | undefined;
   if (built.actionType === "send" && !isReplyInThread) {
     const cfg = loadConfig();
-    const ilPage = await getPage(notionPageId);
-    const dtcCheck = await resolveDtcOutboundSend(ilPage, cfg);
-    if (!dtcCheck.ok) {
-      await softFail(dtcCheck.reason);
-      return;
+    const page = await getPage(notionPageId);
+    if (isCampaignHistoryPage(page)) {
+      const campCheck = await resolveCampaignOutboundSend(page, cfg);
+      if (!campCheck.ok) {
+        await softFail(campCheck.reason);
+        return;
+      }
+      campaignBundle = campCheck.bundle;
+      draft.to = [campCheck.bundle.recipientEmail];
+      try {
+        const rendered = await resolveCampaignCopy({
+          historyPage: page,
+          subject: draft.subject,
+          body: draft.bodyHtml,
+          bundle: campCheck.bundle,
+          fromMailbox: draft.fromMailbox,
+        });
+        draft.subject = rendered.subject;
+        draft.bodyHtml = rendered.body.includes("<")
+          ? rendered.body
+          : rendered.body.replace(/\n/g, "<br>");
+        draft.isHtml = true;
+        if (rendered.usedTemplate) {
+          await updatePage(notionPageId, {
+            [cfg.notion.property_names.subject]: notionRichText(rendered.subject),
+            [cfg.notion.property_names.body]: notionRichText(rendered.body),
+          });
+          logger.info(
+            { notionPageId, templatePageId: rendered.templatePageId },
+            "send: rendered Subject/Body from Campaign template",
+          );
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        await softFail(msg);
+        return;
+      }
+    } else {
+      const dtcCheck = await resolveDtcOutboundSend(page, cfg);
+      if (!dtcCheck.ok) {
+        await softFail(dtcCheck.reason);
+        return;
+      }
+      draft.to = [dtcCheck.bundle.recipientEmail];
+      built.dtc = dtcCheck.bundle;
     }
-    draft.to = [dtcCheck.bundle.recipientEmail];
-    built.dtc = dtcCheck.bundle;
   }
 
   if (!isReplyInThread && draft.to.length === 0) {
     await softFail(
       built.actionType === "send"
-        ? "missing recipient (DTC Key Person Email / gate failed)"
+        ? "missing recipient (Key Person Email / gate failed)"
         : "missing recipient (no Payload.to_email / Reply Email)",
     );
     return;
@@ -128,6 +181,37 @@ async function process(job: Job<SendJobData>): Promise<void> {
       logger.info(
         { notionPageId, to: draft.to[0], unsubUrlPrefix: publicBase },
         "send: MIME outbound with List-Unsubscribe + List-Unsubscribe-Post",
+      );
+    }
+
+    if (
+      canIssueOpenTracking({
+        enabled: cfg.mail.open_tracking_enabled,
+        publicBaseUrl: publicBase,
+        secret,
+      })
+    ) {
+      draft.bodyHtml = coercePlainTextToHtml(draft.bodyHtml);
+      draft.isHtml = true;
+      const openToken = createOpenTrackToken(
+        { recipientEmail: draft.to[0], notionPageId },
+        secret,
+        cfg.mail.open_tracking_token_ttl_days * 24 * 60 * 60,
+      );
+      const pixelUrl = buildOpenPixelUrl({
+        publicBaseUrl: publicBase,
+        openPath: cfg.mail.open_tracking_path,
+        token: openToken,
+      });
+      draft.bodyHtml = injectOpenPixel(draft.bodyHtml, pixelUrl);
+      logger.info(
+        { notionPageId, to: draft.to[0], openPath: cfg.mail.open_tracking_path },
+        "send: injected open-tracking pixel",
+      );
+    } else if (cfg.mail.open_tracking_enabled) {
+      logger.warn(
+        { notionPageId, publicBase: publicBase || "(empty)" },
+        "send: skipping open pixel — need https public base + token secret (≥8)",
       );
     }
   }
@@ -217,12 +301,19 @@ async function process(job: Job<SendJobData>): Promise<void> {
 
     try {
       const cfg = loadConfig();
-      const crm = built.dtc
+      const crm = campaignBundle
         ? await extractCrmFromDtcPageIds(cfg, {
-            entityPageId: built.dtc.entityPageId,
-            keyPersonPageId: built.dtc.keyPersonPageId,
+            keyPersonPageId: campaignBundle.keyPersonPageId,
           })
-        : await extractCrmFromInteractionLogPage(await getPage(notionPageId), cfg);
+        : built.dtc
+          ? await extractCrmFromDtcPageIds(cfg, {
+              entityPageId: built.dtc.entityPageId,
+              keyPersonPageId: built.dtc.keyPersonPageId,
+            })
+          : await extractCrmFromInteractionLogPage(await getPage(notionPageId), cfg);
+      if (campaignBundle?.companyName) {
+        crm.entityName = crm.entityName || campaignBundle.companyName;
+      }
       await updateOutboundCrmFields(inserted.id, crm);
     } catch (err) {
       logger.warn({ err, notionPageId, outboundId: inserted.id }, "send: optional CRM snapshot failed");
@@ -235,6 +326,12 @@ async function process(job: Job<SendJobData>): Promise<void> {
       sentAt,
     });
 
+    if (campaignBundle) {
+      await lockActiveKeyPersonAfterSend(notionPageId).catch((err) =>
+        logger.warn({ err, notionPageId }, "send: lock active KP failed"),
+      );
+    }
+
     logger.info(
       {
         notionPageId,
@@ -242,6 +339,7 @@ async function process(job: Job<SendJobData>): Promise<void> {
         to: draft.to,
         conversationId: hit.conversationId,
         status: loadConfig().notion.status_values.success,
+        campaign: Boolean(campaignBundle),
       },
       "send: success (notion status verified)",
     );

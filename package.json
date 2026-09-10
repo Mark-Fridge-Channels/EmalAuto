@@ -29,6 +29,9 @@
     "debug:notion-il-sample": "tsx scripts/debug-notion-il-crm-sample.ts",
     "reconcile:inbox": "tsx scripts/reconcile-inbox-after-outbound-backfill.ts",
     "sync:thread-status-from-inbox": "tsx scripts/sync-thread-status-from-inbox.ts",
+    "campaign:seed-templates": "tsx scripts/seed-campaign-templates.ts",
+    "campaign:verify-templates": "tsx scripts/verify-campaign-templates.ts",
+    "campaign:orchestrate": "tsx scripts/orchestrate-campaign.ts",
     "lint": "tsc --noEmit",
     "test": "node --test --import tsx tests/**/*.test.ts"
   },

@@ -1,7 +1,7 @@
 /**
  * Notion -> send queue.
  *
- * Every `polling.notion_interval_ms`, query the configured DB for rows where:
+ * Every `polling.notion_interval_ms`, query configured DBs for rows where:
  *   Status     ∈ {todo}
  *   Action     ∈ {send, reply}
  *   Platform   = Email
@@ -10,14 +10,11 @@
  *                 - start (required) ≤ now
  *                 - end   (optional) ≥ now  (no end = open-ended window)
  *
- * All comparisons are in UTC. Notion's date filter and `new Date(...)` parsing
- * both honor the timezone embedded in the stored ISO string, so a value saved
- * as "+08:00" or "Z" is converted to the same UTC instant before comparison.
+ * Sources (Scheme A):
+ *   - CampaignHistoryDB when `campaign.poll_history` + history_database_id set
+ *   - Interaction LOG when `campaign.poll_interaction_log` (legacy)
  *
- * For each hit, enqueue a `send` job keyed by Notion `page_id` (idempotent).
- *
- * We do NOT flip status here — the send worker is responsible for the
- * sending→Success/Failure transitions. We only enqueue.
+ * Property types are cached **per database** (History Status is select; IL may differ).
  */
 
 import { logger } from "../utils/logger.js";
@@ -29,26 +26,21 @@ import { buildPropertyResolver, readDateEnd, readDateStart } from "./property-ma
 let timer: NodeJS.Timeout | null = null;
 let inFlight = false;
 
-/**
- * Cache of Notion column-type lookups. Notion validates filter clauses against
- * the actual column type *before* honoring OR semantics, so we must emit the
- * right discriminator (`status` vs `select`) per column. We refresh lazily.
- */
-let propertyTypes: Record<string, string> | null = null;
+/** Cache of Notion column-type lookups, keyed by database id. */
+const propertyTypesByDb = new Map<string, Record<string, string>>();
 
-async function ensurePropertyTypes(): Promise<Record<string, string>> {
-  if (propertyTypes) return propertyTypes;
-  const cfg = loadConfig();
-  const db = await retrieveDatabase(cfg.notion.database_id);
+async function ensurePropertyTypes(databaseId: string): Promise<Record<string, string>> {
+  const cached = propertyTypesByDb.get(databaseId);
+  if (cached) return cached;
+  const db = await retrieveDatabase(databaseId);
   const out: Record<string, string> = {};
   for (const [name, def] of Object.entries(db.properties)) {
     out[name] = def.type;
   }
-  propertyTypes = out;
+  propertyTypesByDb.set(databaseId, out);
   return out;
 }
 
-/** Build a Notion filter clause for a column whose Notion type may be either select or status. */
 function selectLikeFilter(
   columnName: string,
   value: string,
@@ -59,16 +51,6 @@ function selectLikeFilter(
   return { property: columnName, select: { equals: value } };
 }
 
-/**
- * Notion filter for the Trigger Time window — start-side only.
- *
- * Notion's date filter compares against `date.start`, so we can require:
- *   1. column not empty (the user MUST fill it)
- *   2. start ≤ now (window has begun)
- *
- * The end-side bound (`end ≥ now`) is enforced in `isWithinTriggerWindow`
- * after fetch, because Notion has no filter operator for `date.end`.
- */
 function triggerTimeDueFilter(columnName: string, nowIso: string): unknown {
   return {
     and: [
@@ -78,7 +60,6 @@ function triggerTimeDueFilter(columnName: string, nowIso: string): unknown {
   };
 }
 
-/** Require non-empty sender column (FCAccount mapped name). Type-aware for Notion filter validation. */
 function nonEmptySenderFilter(columnName: string, types: Record<string, string>): unknown {
   const t = types[columnName];
   if (t === "email") return { property: columnName, email: { is_not_empty: true } };
@@ -86,10 +67,10 @@ function nonEmptySenderFilter(columnName: string, types: Record<string, string>)
   return { property: columnName, rich_text: { is_not_empty: true } };
 }
 
-async function buildFilter(nowIso: string): Promise<unknown> {
+async function buildFilter(databaseId: string, nowIso: string): Promise<unknown> {
   const cfg = loadConfig();
   const p = cfg.notion.property_names;
-  const types = await ensurePropertyTypes();
+  const types = await ensurePropertyTypes(databaseId);
   return {
     and: [
       selectLikeFilter(p.Status, cfg.notion.status_values.todo, types),
@@ -107,12 +88,6 @@ async function buildFilter(nowIso: string): Promise<unknown> {
   };
 }
 
-/**
- * UTC-precise window check on a single Notion page:
- *   start ≤ now (already filtered by Notion, re-checked defensively)
- *   end   ≥ now  if end is set
- * Returns `null` when the page should be enqueued; otherwise a reason string.
- */
 function isOutsideTriggerWindow(
   page: { properties: Record<string, any> },
   nowMs: number,
@@ -134,45 +109,84 @@ function isOutsideTriggerWindow(
   return null;
 }
 
+function pollTargets(): Array<{ databaseId: string; label: string }> {
+  const cfg = loadConfig();
+  const out: Array<{ databaseId: string; label: string }> = [];
+  if (cfg.notion.campaign.poll_history && cfg.notion.campaign.history_database_id) {
+    out.push({ databaseId: cfg.notion.campaign.history_database_id, label: "campaign_history" });
+  }
+  if (cfg.notion.campaign.poll_interaction_log && cfg.notion.database_id) {
+    out.push({ databaseId: cfg.notion.database_id, label: "interaction_log" });
+  }
+  // Safety: if both flags somehow false, still poll IL so ops is not silent.
+  if (out.length === 0 && cfg.notion.database_id) {
+    out.push({ databaseId: cfg.notion.database_id, label: "interaction_log" });
+  }
+  return out;
+}
+
+async function pollOneDatabase(
+  databaseId: string,
+  label: string,
+  nowMs: number,
+  nowIso: string,
+): Promise<{ enqueued: number; skipped: number }> {
+  let cursor: string | undefined;
+  let totalEnq = 0;
+  let totalSkipped = 0;
+  do {
+    const opts: { pageSize: number; filter: unknown; startCursor?: string } = {
+      pageSize: 25,
+      filter: await buildFilter(databaseId, nowIso),
+    };
+    if (cursor) opts.startCursor = cursor;
+    const res = await queryDatabase(databaseId, opts);
+    for (const page of res.results) {
+      const why = isOutsideTriggerWindow(page, nowMs);
+      if (why) {
+        totalSkipped += 1;
+        logger.debug({ notionPageId: page.id, database: label, reason: why }, "skip: trigger window");
+        continue;
+      }
+      await sendQueue.add(
+        "send",
+        { notionPageId: page.id },
+        { jobId: `send__${page.id}` },
+      );
+      totalEnq += 1;
+    }
+    cursor = res.has_more && res.next_cursor ? res.next_cursor : undefined;
+  } while (cursor);
+  return { enqueued: totalEnq, skipped: totalSkipped };
+}
+
 async function tick(): Promise<void> {
   if (inFlight) return;
   inFlight = true;
-  const cfg = loadConfig();
   try {
-    // Snapshot 'now' once per tick so the Notion-side filter and the
-    // application-side window check use the exact same UTC instant.
     const nowMs = Date.now();
     const nowIso = new Date(nowMs).toISOString();
-
-    let cursor: string | undefined;
+    const targets = pollTargets();
     let totalEnq = 0;
     let totalSkipped = 0;
-    do {
-      const opts: { pageSize: number; filter: unknown; startCursor?: string } = {
-        pageSize: 25,
-        filter: await buildFilter(nowIso),
-      };
-      if (cursor) opts.startCursor = cursor;
-      const res = await queryDatabase(cfg.notion.database_id, opts);
-      for (const page of res.results) {
-        const why = isOutsideTriggerWindow(page, nowMs);
-        if (why) {
-          totalSkipped += 1;
-          logger.debug({ notionPageId: page.id, reason: why }, "skip: trigger window");
-          continue;
-        }
-        await sendQueue.add(
-          "send",
-          { notionPageId: page.id },
-          { jobId: `send__${page.id}` },
+    for (const t of targets) {
+      const r = await pollOneDatabase(t.databaseId, t.label, nowMs, nowIso);
+      totalEnq += r.enqueued;
+      totalSkipped += r.skipped;
+      if (r.enqueued > 0 || r.skipped > 0) {
+        logger.info(
+          {
+            database: t.label,
+            enqueued: r.enqueued,
+            skipped_outside_window: r.skipped,
+          },
+          "notion poll: database tick",
         );
-        totalEnq += 1;
       }
-      cursor = res.has_more && res.next_cursor ? res.next_cursor : undefined;
-    } while (cursor);
+    }
     if (totalEnq > 0 || totalSkipped > 0) {
       logger.info(
-        { enqueued: totalEnq, skipped_outside_window: totalSkipped },
+        { enqueued: totalEnq, skipped_outside_window: totalSkipped, databases: targets.length },
         "notion poll: tick done",
       );
     }
@@ -188,7 +202,14 @@ export function startNotionPoller(): void {
   const cfg = loadConfig();
   void tick();
   timer = setInterval(() => void tick(), cfg.polling.notion_interval_ms);
-  logger.info({ intervalMs: cfg.polling.notion_interval_ms }, "notion poller started");
+  logger.info(
+    {
+      intervalMs: cfg.polling.notion_interval_ms,
+      pollHistory: cfg.notion.campaign.poll_history,
+      pollIl: cfg.notion.campaign.poll_interaction_log,
+    },
+    "notion poller started",
+  );
 }
 
 export function stopNotionPoller(): void {
@@ -202,4 +223,9 @@ export function stopNotionPoller(): void {
 /** Whether the Notion send-task poller interval is active (runs in the API process). */
 export function isNotionPollerRunning(): boolean {
   return timer !== null;
+}
+
+/** Test helper: clear property-type cache between suites. */
+export function _resetPollerPropertyTypeCacheForTests(): void {
+  propertyTypesByDb.clear();
 }

@@ -47,10 +47,16 @@ export async function resolveDtcOutboundSend(
   const kpProps = keyPersonPage.properties as Record<string, unknown>;
 
   const emailVerify = readPlainStatusOrSelect(kpProps[d.key_person_columns.email_verified_status]);
-  if (emailVerify !== d.key_person_email_verified_value) {
+  const accepted = new Set(
+    (d.key_person_email_verified_values?.length
+      ? d.key_person_email_verified_values
+      : [d.key_person_email_verified_value]
+    ).map((s) => s.trim()),
+  );
+  if (!accepted.has(emailVerify)) {
     return {
       ok: false,
-      reason: `DTC Key Person Email Verified Status is "${emailVerify || '(empty)'}" (required: ${d.key_person_email_verified_value})`,
+      reason: `DTC Key Person Email Verified Status is "${emailVerify || "(empty)"}" (required one of: ${[...accepted].join(", ")})`,
     };
   }
 
@@ -81,6 +87,8 @@ async function resolveDtcKeyPersonPageId(
   if (ilId) {
     const ilPage = await getPage(ilId);
     const props = ilPage.properties as Record<string, unknown>;
+    const fromHistory = readRelationPageId(props.KeyPerson);
+    if (fromHistory) return { keyPersonPageId: fromHistory, source: "history_key_person_relation" };
     const fromRel = readRelationPageId(props[d.il_columns.dtc_key_person]);
     if (fromRel) return { keyPersonPageId: fromRel, source: "il_dtc_key_person_relation" };
   }

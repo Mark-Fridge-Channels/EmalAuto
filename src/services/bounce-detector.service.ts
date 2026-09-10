@@ -68,9 +68,61 @@ function classifyFromHeaders(headers: Array<{ name?: string; value?: string }>):
   return null;
 }
 
+export type BounceSeverity = "hard" | "soft" | "unknown";
+
 export interface BounceVerdict {
   isBounce: boolean;
   reason: string;
+  /** Only meaningful when `isBounce` is true. Soft → no KP switch. */
+  severity: BounceSeverity;
+}
+
+/** Phrases that strongly indicate permanent / hard failure (invalid mailbox, etc.). */
+const HARD_BOUNCE_PATTERNS = [
+  /address not found/i,
+  /user unknown/i,
+  /unknown user/i,
+  /no such user/i,
+  /does not exist/i,
+  /recipient.*(rejected|not found|unknown)/i,
+  /mailbox.*(not found|unavailable|does not exist)/i,
+  /invalid.*(recipient|mailbox|address)/i,
+  /550\s*5\.1\.1/i,
+  /5\.1\.1/i,
+  /5\.1\.10/i,
+  /permanent failure/i,
+  /permanently rejected/i,
+];
+
+/** Phrases that indicate transient / soft failure (quota, greylist, spam defer). */
+const SOFT_BOUNCE_PATTERNS = [
+  /mailbox full/i,
+  /over quota/i,
+  /quota exceeded/i,
+  /try again later/i,
+  /temporarily (deferred|rejected|unavailable)/i,
+  /4\.\d\.\d/i,
+  /greylist/i,
+  /rate.?limit/i,
+  /too many/i,
+  /suspected.*spam/i,
+  /spam.*reject/i,
+  /message.*(deferred|delayed)/i,
+];
+
+function classifySeverity(subj: string, body: string, reason: string): BounceSeverity {
+  const blob = `${subj}\n${body}\n${reason}`;
+  for (const p of HARD_BOUNCE_PATTERNS) {
+    if (p.test(blob)) return "hard";
+  }
+  for (const p of SOFT_BOUNCE_PATTERNS) {
+    if (p.test(blob)) return "soft";
+  }
+  // Conservative default: treat unclassified NDRs as hard so KP advance still runs
+  // for classic "address not found" paths that only matched from/mailer-daemon.
+  if (/address not found/i.test(subj)) return "hard";
+  if (/mailer-daemon|postmaster|microsoftexchange/i.test(reason)) return "unknown";
+  return "unknown";
 }
 
 export function detectBounce(input: {
@@ -83,20 +135,42 @@ export function detectBounce(input: {
   const subj = input.subject ?? "";
   const body = input.bodyPreview ?? "";
 
+  let reason = "";
   for (const p of FROM_BOUNCE_PATTERNS) {
-    if (p.test(from)) return { isBounce: true, reason: `from matched ${p}` };
+    if (p.test(from)) {
+      reason = `from matched ${p}`;
+      break;
+    }
   }
-  for (const p of SUBJECT_BOUNCE_PATTERNS) {
-    if (p.test(subj)) return { isBounce: true, reason: `subject matched ${p}` };
+  if (!reason) {
+    for (const p of SUBJECT_BOUNCE_PATTERNS) {
+      if (p.test(subj)) {
+        reason = `subject matched ${p}`;
+        break;
+      }
+    }
   }
-  for (const p of BODY_BOUNCE_PATTERNS) {
-    if (p.test(body)) return { isBounce: true, reason: `body matched ${p}` };
+  if (!reason) {
+    for (const p of BODY_BOUNCE_PATTERNS) {
+      if (p.test(body)) {
+        reason = `body matched ${p}`;
+        break;
+      }
+    }
   }
-
-  if (input.headers?.length) {
+  if (!reason && input.headers?.length) {
     const fromHeaders = classifyFromHeaders(input.headers);
-    if (fromHeaders) return { isBounce: true, reason: fromHeaders };
+    if (fromHeaders) reason = fromHeaders;
   }
 
-  return { isBounce: false, reason: "" };
+  if (!reason) return { isBounce: false, reason: "", severity: "unknown" };
+
+  const severity = classifySeverity(subj, body, reason);
+  return { isBounce: true, reason, severity };
+}
+
+/** True when campaign KP list should advance (Hard Bounce only). */
+export function shouldAdvanceKpOnBounce(verdict: BounceVerdict): boolean {
+  if (!verdict.isBounce) return false;
+  return verdict.severity === "hard" || verdict.severity === "unknown";
 }

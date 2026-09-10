@@ -27,6 +27,12 @@ export async function listEnabledMailboxes(): Promise<Mailbox[]> {
   return db.select().from(mailboxes).where(eq(mailboxes.enabled, true));
 }
 
+/** Mailboxes allowed for outbound campaign sticky assignment. */
+export async function listSendableMailboxes(): Promise<Mailbox[]> {
+  const rows = await listEnabledMailboxes();
+  return rows.filter((r) => r.canSend);
+}
+
 export async function listAllMailboxes(): Promise<Mailbox[]> {
   return db.select().from(mailboxes);
 }

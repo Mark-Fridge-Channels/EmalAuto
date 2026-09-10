@@ -119,6 +119,8 @@ const notionDtcSchema = z.object({
     email_verified_status: z.string().min(1),
   }),
   key_person_email_verified_value: z.string().min(1),
+  /** Accepted Email Verified Status values for outbound gates (Verified + Icypeas Verified). */
+  key_person_email_verified_values: z.array(z.string().min(1)).min(1),
   /** DTC Key Person Email Verified Status written when a bounce is matched. */
   key_person_email_failed_value: z.string().min(1),
   /** DTC Entity ColdReach Status written when a **human** inbound reply is matched. */
@@ -165,6 +167,26 @@ const notionSchema = z.object({
   in_n_out_value: z.string().min(1),
   /** Value written into InNOut for the new inbound-reply child row (default "In"). */
   in_n_out_inbound_value: z.string().min(1),
+  /** Scheme A Christmas Pilot DBs (optional until campaign path is enabled). */
+  campaign: z.object({
+    campaign_key: z.string(),
+    campaign_database_id: z.string(),
+    history_database_id: z.string(),
+    client_database_id: z.string(),
+    key_person_database_id: z.string(),
+    sales_channel_database_id: z.string(),
+    timezone: z.string().min(1),
+    window_start: z.string(),
+    window_end: z.string(),
+    daily_cap_per_mailbox: z.number().int().positive(),
+    status_cancelled: z.string().min(1),
+    /** Poll CampaignHistoryDB for send tasks. */
+    poll_history: z.boolean(),
+    /** Also poll legacy Interaction LOG (`NOTION_DATABASE_ID`). */
+    poll_interaction_log: z.boolean(),
+    dtc_pilot_page_url: z.string(),
+    asin_pilot_page_url: z.string(),
+  }),
 });
 
 const graphAppSchema = z.object({
@@ -252,6 +274,12 @@ const mailSchema = z.object({
   /** HMAC secret for unsubscribe tokens (min 8 chars when headers are issued). */
   list_unsubscribe_token_secret: z.string(),
   list_unsubscribe_token_ttl_days: z.number().int().min(1).max(730),
+  /** Inject 1×1 open-tracking pixel on cold Send Email. */
+  open_tracking_enabled: z.boolean(),
+  /** Path prefix for open pixel (`/t/o/:token.gif`). */
+  open_tracking_path: z.string().min(1),
+  /** Open-token TTL (defaults to unsubscribe TTL when env omitted). */
+  open_tracking_token_ttl_days: z.number().int().min(1).max(730),
 });
 
 export const configSchema = z
@@ -390,6 +418,10 @@ export function loadConfig(): AppConfig {
           ),
         },
         key_person_email_verified_value: envStr("NOTION_DTC_KP_EMAIL_VERIFIED_VALUE", "Verified"),
+        key_person_email_verified_values: envCsv("NOTION_DTC_KP_EMAIL_VERIFIED_VALUES", [
+          "Verified",
+          "Icypeas Verified",
+        ]),
         key_person_email_failed_value: envStr(
           "NOTION_DTC_KP_EMAIL_FAILED_VALUE",
           "Send Email Failed",
@@ -400,6 +432,32 @@ export function loadConfig(): AppConfig {
           kp_name_prop: envStr("NOTION_IL_SYNC_KP_NAME_PROP", "name"),
           entity_name_prop: envStr("NOTION_IL_SYNC_ENTITY_NAME_PROP", "Entity Name"),
         },
+      },
+      campaign: {
+        campaign_key: envStr("NOTION_CAMPAIGN_KEY", "christmas_pilot_2026"),
+        campaign_database_id: envStr("NOTION_CAMPAIGN_DATABASE_ID", ""),
+        history_database_id: envStr("NOTION_CAMPAIGN_HISTORY_DATABASE_ID", ""),
+        client_database_id: envStr(
+          "NOTION_CLIENT_DATABASE_ID",
+          "6c192adbe3e642f093339800b544bea7",
+        ),
+        key_person_database_id: envStr(
+          "NOTION_KEYPERSON_DATABASE_ID",
+          "0189166fd9fd8373962601cc3dddd878",
+        ),
+        sales_channel_database_id: envStr(
+          "NOTION_SALES_CHANNEL_DATABASE_ID",
+          "1b83bb95e0334747bc5f5436eb74753d",
+        ),
+        timezone: envStr("CAMPAIGN_TIMEZONE", "America/New_York"),
+        window_start: envStr("CAMPAIGN_WINDOW_START", "2026-09-10"),
+        window_end: envStr("CAMPAIGN_WINDOW_END", "2026-09-18"),
+        daily_cap_per_mailbox: envInt("CAMPAIGN_DAILY_CAP_PER_MAILBOX", 50),
+        status_cancelled: envStr("NOTION_STATUS_CANCELLED", "Cancelled"),
+        poll_history: envBool("CAMPAIGN_POLL_HISTORY", true),
+        poll_interaction_log: envBool("CAMPAIGN_POLL_INTERACTION_LOG", true),
+        dtc_pilot_page_url: envStr("CAMPAIGN_DTC_PILOT_PAGE_URL", ""),
+        asin_pilot_page_url: envStr("CAMPAIGN_ASIN_PILOT_PAGE_URL", ""),
       },
     },
     graph_apps_source,
@@ -463,6 +521,12 @@ export function loadConfig(): AppConfig {
         envStr("V2_CLIENT_STATE_SECRET", "") ||
         sessionSecret,
       list_unsubscribe_token_ttl_days: envInt("LIST_UNSUBSCRIBE_TOKEN_TTL_DAYS", 365),
+      open_tracking_enabled: envBool("MAIL_OPEN_TRACKING_ENABLED", true),
+      open_tracking_path: envStr("MAIL_OPEN_TRACKING_PATH", "/t/o"),
+      open_tracking_token_ttl_days: envInt(
+        "MAIL_OPEN_TRACKING_TOKEN_TTL_DAYS",
+        envInt("LIST_UNSUBSCRIBE_TOKEN_TTL_DAYS", 365),
+      ),
     },
   };
 
@@ -511,6 +575,10 @@ export function printConfigSummary(cfg: AppConfig = loadConfig()): void {
   log("notion.database_id =", cfg.notion.database_id);
   log("notion.token       =", mask(cfg.notion.token, 6, 4));
   log("notion.version     =", cfg.notion.notion_version);
+  log("campaign.key       =", cfg.notion.campaign.campaign_key || "(empty)");
+  log("campaign.db        =", cfg.notion.campaign.campaign_database_id || "(empty)");
+  log("campaign.history   =", cfg.notion.campaign.history_database_id || "(empty)");
+  log("campaign.window    =", `${cfg.notion.campaign.window_start} → ${cfg.notion.campaign.window_end} (${cfg.notion.campaign.timezone})`);
   log("graph_apps_source  =", cfg.graph_apps_source);
   log("graph_apps.count   =", Object.keys(getEffectiveGraphAppsSync(cfg)).length);
   for (const [domain, app] of Object.entries(getEffectiveGraphAppsSync(cfg))) {
@@ -539,6 +607,7 @@ export function printConfigSummary(cfg: AppConfig = loadConfig()): void {
   log("mail.unsub_path      =", cfg.mail.list_unsubscribe_path);
   log("mail.unsub_base      =", cfg.mail.list_unsubscribe_public_base_url || "(empty)");
   log("mail.unsub_secret    =", mask(cfg.mail.list_unsubscribe_token_secret, 4, 2));
+  log("mail.open_tracking   =", cfg.mail.open_tracking_enabled ? `on ${cfg.mail.open_tracking_path}` : "off");
 }
 
 /** Test helper: drop the cached config so the next `loadConfig` re-reads env. */

@@ -206,18 +206,39 @@ export function buildPropertyResolver(cfg: AppConfig) {
 
 /* ------------------------- Write helpers ------------------------- */
 
-const RICH_TEXT_LIMIT = 1900;
+const RICH_TEXT_CHUNK = 1900;
+/** Notion allows many rich_text items; keep a safe upper bound per write. */
+const RICH_TEXT_MAX_CHUNKS = 50;
 
-export function notionRichText(content: string): { rich_text: Array<{ type: "text"; text: { content: string } }> } {
+export function notionRichText(content: string): {
+  rich_text: Array<{ type: "text"; text: { content: string } }>;
+} {
   const c = String(content ?? "");
-  const truncated = c.length > RICH_TEXT_LIMIT ? `${c.slice(0, RICH_TEXT_LIMIT)}…` : c;
-  return { rich_text: [{ type: "text", text: { content: truncated } }] };
+  if (!c) return { rich_text: [{ type: "text", text: { content: "" } }] };
+  const chunks: Array<{ type: "text"; text: { content: string } }> = [];
+  for (let i = 0; i < c.length && chunks.length < RICH_TEXT_MAX_CHUNKS; i += RICH_TEXT_CHUNK) {
+    chunks.push({ type: "text", text: { content: c.slice(i, i + RICH_TEXT_CHUNK) } });
+  }
+  return { rich_text: chunks };
 }
 
 export function notionTitle(content: string): { title: Array<{ type: "text"; text: { content: string } }> } {
   const c = String(content ?? "");
-  const truncated = c.length > RICH_TEXT_LIMIT ? `${c.slice(0, RICH_TEXT_LIMIT)}…` : c;
+  const truncated = c.length > RICH_TEXT_CHUNK ? `${c.slice(0, RICH_TEXT_CHUNK)}…` : c;
   return { title: [{ type: "text", text: { content: truncated } }] };
+}
+
+/** Date-only (no time) for campaign windows / business-day triggers. */
+export function notionDateOnly(isoDate: string): { date: { start: string } } {
+  return { date: { start: String(isoDate).slice(0, 10) } };
+}
+
+export function notionCheckbox(checked: boolean): { checkbox: boolean } {
+  return { checkbox: Boolean(checked) };
+}
+
+export function notionNumber(n: number): { number: number } {
+  return { number: n };
 }
 
 export function notionSelect(name: string): { select: { name: string } } {
@@ -235,6 +256,41 @@ export function notionDate(date: Date): { date: { start: string } } {
 export function notionEmail(email: string): { email: string | null } {
   const e = String(email ?? "").trim().toLowerCase();
   return { email: e || null };
+}
+
+export function notionRelation(pageIds: string[]): { relation: Array<{ id: string }> } {
+  const seen = new Set<string>();
+  const relation: Array<{ id: string }> = [];
+  for (const raw of pageIds) {
+    const cleaned = String(raw || "").replace(/-/g, "");
+    if (cleaned.length !== 32) continue;
+    const id = `${cleaned.slice(0, 8)}-${cleaned.slice(8, 12)}-${cleaned.slice(12, 16)}-${cleaned.slice(16, 20)}-${cleaned.slice(20)}`;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    relation.push({ id });
+  }
+  return { relation };
+}
+
+const AMERICA_NEW_YORK = "America/New_York";
+
+/** Wall-clock datetime in America/New_York for Trigger Time. */
+export function notionDateTimeAmericaNewYork(date: Date): {
+  date: { start: string; time_zone: string };
+} {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: AMERICA_NEW_YORK,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(date);
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "00";
+  const start = `${get("year")}-${get("month")}-${get("day")}T${get("hour")}:${get("minute")}:${get("second")}`;
+  return { date: { start, time_zone: AMERICA_NEW_YORK } };
 }
 
 const ASIA_SHANGHAI = "Asia/Shanghai";

@@ -15,6 +15,7 @@ import { logger } from "./utils/logger.js";
 import { registerHealthRoutes } from "./routes/health.routes.js";
 import { registerGraphWebhookRoutes } from "./routes/webhook.graph.routes.js";
 import { registerUnsubscribeRoutes } from "./routes/unsubscribe.routes.js";
+import { registerOpenPixelRoutes } from "./routes/open-pixel.routes.js";
 import { startNotionPoller, stopNotionPoller } from "./notion/poller.js";
 import { auditMailboxesAgainstApps } from "./db/repositories/mailbox.repo.js";
 import { validateNotionSchema } from "./notion/schema-validator.js";
@@ -60,6 +61,7 @@ async function main(): Promise<void> {
   });
   await registerHealthRoutes(app);
   await registerUnsubscribeRoutes(app);
+  await registerOpenPixelRoutes(app);
   await registerAdminConsole(app);
   if (cfg.v2.enabled) {
     await registerGraphWebhookRoutes(app);

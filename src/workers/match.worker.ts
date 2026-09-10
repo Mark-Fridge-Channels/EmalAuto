@@ -22,7 +22,7 @@ import { QUEUE_NAMES, type MatchJobData } from "../queues/queues.js";
 import { findInboxById, markInboxIgnored, markInboxMatched } from "../db/repositories/inbox.repo.js";
 import { findMailboxById } from "../db/repositories/mailbox.repo.js";
 import { resolveInboundOutboundMatch } from "../services/reply-matcher.service.js";
-import { detectBounce } from "../services/bounce-detector.service.js";
+import { detectBounce, shouldAdvanceKpOnBounce } from "../services/bounce-detector.service.js";
 import { extractFailedRecipientEmails } from "../services/bounce-matcher.service.js";
 import { detectReplyKind } from "../services/auto-reply-detector.service.js";
 import { getMessageInternetHeaders } from "../graph/mail.service.js";
@@ -37,6 +37,12 @@ import { createInboundReplyRow, markOriginalReplyDone, writeBounce } from "../no
 import { getPage } from "../notion/client.js";
 import { extractCrmFromInteractionLogPage } from "../notion/crm-snapshot.js";
 import { updateInboxCrmFields } from "../db/repositories/inbox.repo.js";
+import {
+  advanceKpOnHardBounce,
+  cancelOpenEmailTodosForClient,
+} from "../campaign/lifecycle.js";
+import { isCampaignHistoryPage } from "../campaign/resolve-send.js";
+import { readRelationPageId } from "../notion/relation.js";
 
 import type { CrmSnapshot } from "../notion/crm-snapshot.js";
 import type { InboxMessage } from "../db/schema/inbox_messages.js";
@@ -229,55 +235,103 @@ async function processMatch(job: Job<MatchJobData>): Promise<void> {
         inboundConversationId: row.conversationId,
         receivedAt: row.receivedAt,
       });
-      const cfg = loadConfig();
+
+      let historyPage: Awaited<ReturnType<typeof getPage>> | null = null;
       try {
-        const kpMark = await markDtcKeyPersonEmailFailedOnBounce(cfg, {
-          ilNotionPageId: matched.notionPageId,
-          keyPersonNotionUrl: crm.keyPersonNotionUrl,
-        });
-        if (kpMark.updated) {
+        historyPage = await getPage(matched.notionPageId);
+      } catch (err) {
+        logger.warn({ err, notionPageId: matched.notionPageId }, "match: could not load bounce page");
+      }
+      const isCampaign = historyPage ? isCampaignHistoryPage(historyPage) : false;
+      const advance = shouldAdvanceKpOnBounce(bounce);
+
+      if (isCampaign && advance) {
+        try {
+          const adv = await advanceKpOnHardBounce(matched.notionPageId);
           logger.info(
             {
               notionPageId: matched.notionPageId,
-              keyPersonPageId: kpMark.keyPersonPageId,
-              status: kpMark.status,
-              source: kpMark.source,
+              severity: bounce.severity,
+              advanced: adv.advanced,
+              exhausted: adv.exhausted,
+              nextKeyPersonId: adv.nextKeyPersonId,
             },
-            "match: DTC Key Person Email Verified Status set after bounce",
+            "match: campaign hard-bounce KP advance",
           );
-        } else {
-          logger.warn(
-            { notionPageId: matched.notionPageId, inboxRowId: row.id, source: kpMark.source },
-            "match: DTC Key Person Email Verified Status not updated (no Key Person page resolved)",
+        } catch (err) {
+          logger.error(
+            { err, notionPageId: matched.notionPageId },
+            "match: campaign hard-bounce KP advance failed",
           );
         }
-      } catch (err) {
-        logger.error(
-          { err, notionPageId: matched.notionPageId, inboxRowId: row.id },
-          "match: DTC Key Person Email Verified Status update failed after bounce",
+      } else if (advance) {
+        const cfg = loadConfig();
+        try {
+          const kpMark = await markDtcKeyPersonEmailFailedOnBounce(cfg, {
+            ilNotionPageId: matched.notionPageId,
+            keyPersonNotionUrl: crm.keyPersonNotionUrl,
+          });
+          if (kpMark.updated) {
+            logger.info(
+              {
+                notionPageId: matched.notionPageId,
+                keyPersonPageId: kpMark.keyPersonPageId,
+                status: kpMark.status,
+                source: kpMark.source,
+                severity: bounce.severity,
+              },
+              "match: DTC Key Person Email Verified Status set after bounce",
+            );
+          } else {
+            logger.warn(
+              { notionPageId: matched.notionPageId, inboxRowId: row.id, source: kpMark.source },
+              "match: DTC Key Person Email Verified Status not updated (no Key Person page resolved)",
+            );
+          }
+        } catch (err) {
+          logger.error(
+            { err, notionPageId: matched.notionPageId, inboxRowId: row.id },
+            "match: DTC Key Person Email Verified Status update failed after bounce",
+          );
+        }
+      } else {
+        logger.info(
+          {
+            notionPageId: matched.notionPageId,
+            severity: bounce.severity,
+            reason: bounce.reason,
+          },
+          "match: soft bounce — no KP switch / no Send Email Failed",
         );
       }
     } else {
       await markInboxMatched(row.id, matched.outboundId, "bounce");
-      try {
-        const kpMark = await markDtcKeyPersonEmailFailedOnBounce(loadConfig(), {
-          keyPersonNotionUrl: crm.keyPersonNotionUrl,
-        });
-        if (kpMark.updated) {
-          logger.info(
-            { keyPersonPageId: kpMark.keyPersonPageId, status: kpMark.status, inboxRowId: row.id },
-            "match: DTC Key Person Email Verified Status set after bounce (no IL page)",
+      if (shouldAdvanceKpOnBounce(bounce)) {
+        try {
+          const kpMark = await markDtcKeyPersonEmailFailedOnBounce(loadConfig(), {
+            keyPersonNotionUrl: crm.keyPersonNotionUrl,
+          });
+          if (kpMark.updated) {
+            logger.info(
+              { keyPersonPageId: kpMark.keyPersonPageId, status: kpMark.status, inboxRowId: row.id },
+              "match: DTC Key Person Email Verified Status set after bounce (no IL page)",
+            );
+          }
+        } catch (err) {
+          logger.error(
+            { err, inboxRowId: row.id, outboundId: matched.outboundId },
+            "match: DTC Key Person Email Verified Status update failed after bounce (no IL page)",
           );
         }
-      } catch (err) {
-        logger.error(
-          { err, inboxRowId: row.id, outboundId: matched.outboundId },
-          "match: DTC Key Person Email Verified Status update failed after bounce (no IL page)",
-        );
       }
     }
     logger.info(
-      { inboxRowId: row.id, outboundId: matched.outboundId, method: matched.method },
+      {
+        inboxRowId: row.id,
+        outboundId: matched.outboundId,
+        method: matched.method,
+        severity: bounce.severity,
+      },
       "match: bounce written",
     );
     return;
@@ -315,6 +369,60 @@ async function processMatch(job: Job<MatchJobData>): Promise<void> {
 
   if (matched.notionPageId) {
     const receivingMailbox = await emailForMailboxId(row.mailboxId);
+
+    let historyPage: Awaited<ReturnType<typeof getPage>> | null = null;
+    try {
+      historyPage = await getPage(matched.notionPageId);
+    } catch (err) {
+      logger.warn({ err, notionPageId: matched.notionPageId }, "match: could not load reply parent page");
+    }
+    const isCampaign = historyPage ? isCampaignHistoryPage(historyPage) : false;
+
+    if (isCampaign && historyPage) {
+      const clientPageId = readRelationPageId(
+        (historyPage.properties as Record<string, unknown>).Client,
+      );
+      if (clientPageId) {
+        try {
+          const cancel = await cancelOpenEmailTodosForClient(
+            clientPageId,
+            `Human reply from ${row.fromEmail} — cancel Client email campaign`,
+          );
+          logger.info(
+            {
+              inboxRowId: row.id,
+              clientPageId,
+              cancelled: cancel.cancelled,
+              parentOutboundNotionPageId: matched.notionPageId,
+            },
+            "match: cancelled Client campaign todos after human reply",
+          );
+        } catch (err) {
+          logger.error(
+            { err, clientPageId, notionPageId: matched.notionPageId },
+            "match: cancel Client campaign todos failed",
+          );
+        }
+      }
+      await markOriginalReplyDone(matched.notionPageId).catch((err) =>
+        logger.warn(
+          { err, parentOutboundNotionPageId: matched.notionPageId },
+          "match: failed to stamp parent Reply Status = Done (campaign)",
+        ),
+      );
+      logger.info(
+        {
+          inboxRowId: row.id,
+          outboundId: matched.outboundId,
+          parentOutboundNotionPageId: matched.notionPageId,
+          method: matched.method,
+          replyKind: replyKind.kind,
+          campaign: true,
+        },
+        "match: human reply on CampaignHistory — skipped IL child row",
+      );
+      return;
+    }
 
     const newPageId = await createInboundReplyRow({
       parentOutboundNotionPageId: matched.notionPageId,

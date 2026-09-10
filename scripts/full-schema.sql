@@ -128,3 +128,18 @@ CREATE TABLE IF NOT EXISTS email_suppressions (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS email_suppressions_email_uniq ON email_suppressions (email);
 ALTER TABLE email_suppressions ENABLE ROW LEVEL SECURITY;
+
+CREATE TABLE IF NOT EXISTS email_opens (
+  id serial PRIMARY KEY,
+  email text NOT NULL,
+  notion_page_id text,
+  outbound_id integer,
+  user_agent text,
+  ip_hash text,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS email_opens_email_idx ON email_opens (email);
+CREATE INDEX IF NOT EXISTS email_opens_notion_idx ON email_opens (notion_page_id);
+CREATE INDEX IF NOT EXISTS email_opens_outbound_idx ON email_opens (outbound_id);
+CREATE INDEX IF NOT EXISTS email_opens_created_idx ON email_opens (created_at);
+ALTER TABLE email_opens ENABLE ROW LEVEL SECURITY;

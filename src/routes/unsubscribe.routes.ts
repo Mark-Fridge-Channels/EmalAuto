@@ -1,6 +1,10 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { cancelOpenEmailTodosForClient } from "../campaign/lifecycle.js";
+import { isCampaignHistoryPage } from "../campaign/resolve-send.js";
 import { loadConfig } from "../config/index.js";
 import { recordEmailSuppression } from "../db/repositories/email-suppression.repo.js";
+import { getPage } from "../notion/client.js";
+import { readRelationPageId } from "../notion/relation.js";
 import { verifyUnsubscribeToken } from "../services/list-unsubscribe.service.js";
 import {
   isOneClickUnsubscribeBody,
@@ -11,6 +15,25 @@ import { logger } from "../utils/logger.js";
 function unsubscribePath(cfg: ReturnType<typeof loadConfig>): string {
   const p = cfg.mail.list_unsubscribe_path.trim();
   return p.startsWith("/") ? p : `/${p}`;
+}
+
+async function cancelCampaignForUnsubscribePage(notionPageId: string, email: string): Promise<void> {
+  try {
+    const page = await getPage(notionPageId);
+    if (!isCampaignHistoryPage(page)) return;
+    const clientPageId = readRelationPageId((page.properties as Record<string, unknown>).Client);
+    if (!clientPageId) return;
+    const cancel = await cancelOpenEmailTodosForClient(
+      clientPageId,
+      `Unsubscribe one-click (${email}) — stop Client email campaign`,
+    );
+    logger.info(
+      { notionPageId, clientPageId, cancelled: cancel.cancelled, email },
+      "unsubscribe: cancelled Client campaign todos",
+    );
+  } catch (err) {
+    logger.error({ err, notionPageId, email }, "unsubscribe: cancel campaign todos failed");
+  }
 }
 
 async function handleUnsubscribeToken(
@@ -30,6 +53,10 @@ async function handleUnsubscribeToken(
     notionPageId,
     source: "list_unsubscribe_one_click",
   });
+
+  if (notionPageId) {
+    await cancelCampaignForUnsubscribePage(notionPageId, recipientEmail);
+  }
 
   logger.info(
     {

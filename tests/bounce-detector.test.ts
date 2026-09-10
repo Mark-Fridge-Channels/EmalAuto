@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { detectBounce } from "../src/services/bounce-detector.service.js";
+import { detectBounce, shouldAdvanceKpOnBounce } from "../src/services/bounce-detector.service.js";
 import { detectReplyKind } from "../src/services/auto-reply-detector.service.js";
 
 test("detectBounce: Office 365 NDR from microsoftexchange@onmicrosoft.com", () => {
@@ -33,6 +33,18 @@ test("detectBounce: Gmail mailer-daemon subject Address not found", () => {
     bodyPreview: "Your message wasn't delivered to micah@rootcology.com",
   });
   assert.equal(verdict.isBounce, true);
+  assert.equal(verdict.severity, "hard");
+});
+
+test("detectBounce: soft bounce mailbox full does not advance KP", () => {
+  const verdict = detectBounce({
+    fromEmail: "mailer-daemon@example.com",
+    subject: "Undeliverable: hello",
+    bodyPreview: "Mailbox full — over quota. Try again later.",
+  });
+  assert.equal(verdict.isBounce, true);
+  assert.equal(verdict.severity, "soft");
+  assert.equal(shouldAdvanceKpOnBounce(verdict), false);
 });
 
 test("detectBounce: multipart/report delivery-status header", () => {
