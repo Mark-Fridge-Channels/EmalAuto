@@ -73,7 +73,7 @@ After first non-Hard-Bounce successful send for the instance
 | Event | Update |
 |-------|--------|
 | Orchestration | `kp_list` frozen; relation `KeyPerson` = first candidate |
-| Hard Bounce + next KP | `kp_list_index`; `KeyPerson` on **current + future** Todos of instance; Payload note |
+| Hard Bounce + next KP | `kp_list_index`; `KeyPerson` on **current + future** Todos of instance; clear Subject/Body so next send re-renders for new KP; Payload note |
 | First / new successful deliverable KP | `active_key_person` lock; align future Todos’ `KeyPerson` |
 | Human reply / unsubscribe | Cancel Client-wide open Todos; do not change list for retry |
 

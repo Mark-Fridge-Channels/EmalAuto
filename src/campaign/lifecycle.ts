@@ -87,6 +87,7 @@ export async function cancelOpenEmailTodosForClient(
 /**
  * On Hard Bounce: advance kp_list for the campaign instance.
  * Soft bounce callers should not invoke this.
+ * Clears Outreach Subject/Body on open instance rows so the next KP gets a fresh template render.
  */
 export async function advanceKpOnHardBounce(historyPageId: string): Promise<{
   advanced: boolean;
@@ -133,7 +134,7 @@ export async function advanceKpOnHardBounce(historyPageId: string): Promise<{
 
   const dbId = cfg.notion.campaign.history_database_id;
   if (!dbId || !instanceKey) {
-    // At least update current page
+    // At least update current page — clear Subject/Body so next send re-renders for new KP
     await updatePage(historyPageId, {
       KeyPerson: notionRelation([nextId]),
       [payloadCol]: notionRichText(JSON.stringify(payload)),
@@ -141,6 +142,8 @@ export async function advanceKpOnHardBounce(historyPageId: string): Promise<{
         props[cfg.notion.property_names.Status],
         cfg.notion.status_values.todo,
       ),
+      [cfg.notion.property_names.subject]: notionRichText(""),
+      [cfg.notion.property_names.body]: notionRichText(""),
       [cfg.notion.property_names.result_remark]: notionRichText(
         `Hard bounce → switched to KP ${next.email ?? nextId}`,
       ),
@@ -202,6 +205,9 @@ export async function advanceKpOnHardBounce(historyPageId: string): Promise<{
           JSON.stringify({ ...rowPayload, kp_list_index: nextIndex, active_key_person_id: null }),
         ),
         [statusName]: st,
+        // Drop A-personalized copy so B gets a fresh template render (First Name, etc.)
+        [cfg.notion.property_names.subject]: notionRichText(""),
+        [cfg.notion.property_names.body]: notionRichText(""),
       };
       if (row.id === historyPageId) {
         patch[cfg.notion.property_names.result_remark] = notionRichText(
